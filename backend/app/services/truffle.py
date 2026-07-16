@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -23,14 +24,16 @@ def run_trufflehog(job_id: str, github_org: str, github_token: str, db: Session)
     db.commit()
 
     try:
+        # Token passed by name only (value via env, read by TruffleHog as
+        # GITHUB_TOKEN) so it never appears in argv — a subprocess error string
+        # then can't leak it. See prowler.run_prowler.
         cmd = [
             "docker", "run", "--rm",
             "-v", f"{host_data_path(scan_dir)}:/output",
-            "-e", f"GITHUB_TOKEN={github_token}",
+            "-e", "GITHUB_TOKEN",
             settings.TRUFFLE_IMAGE,
             "github",
             "--org", github_org,
-            "--token", github_token,
             "--json",
             "--only-verified",  # remove for unverified secrets too; start conservative
             "--detector=AWS",
@@ -38,7 +41,8 @@ def run_trufflehog(job_id: str, github_org: str, github_token: str, db: Session)
 
         with open(output_file, "w") as out:
             result = subprocess.run(
-                cmd, stdout=out, stderr=subprocess.PIPE, text=True, timeout=3600
+                cmd, stdout=out, stderr=subprocess.PIPE, text=True, timeout=3600,
+                env={**os.environ, "GITHUB_TOKEN": github_token},
             )
 
         # TruffleHog exits non-zero when secrets found — that's expected

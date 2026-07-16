@@ -1,11 +1,11 @@
-import boto3
 from botocore.exceptions import ClientError
 from sqlalchemy.orm import Session
 
 from app.models.db import CorrelatedAlert, IAMLookup, ScanJob, TruffleFinding
+from app.services.aws_profiles import get_session
 
 
-def run_correlation(job_id: str, role_arn: str, db: Session):
+def run_correlation(job_id: str, profile: str, db: Session):
     """
     For every TruffleHog finding with an AWS key ID:
     1. Look up the key in IAM (active status, owner, policies)
@@ -26,20 +26,9 @@ def run_correlation(job_id: str, role_arn: str, db: Session):
     if not findings:
         return
 
-    # Assume the client role for IAM lookups
-    sts = boto3.client("sts")
-    assumed = sts.assume_role(
-        RoleArn=role_arn,
-        RoleSessionName="RhinoCorrelation",
-    )
-    creds = assumed["Credentials"]
-
-    iam = boto3.client(
-        "iam",
-        aws_access_key_id=creds["AccessKeyId"],
-        aws_secret_access_key=creds["SecretAccessKey"],
-        aws_session_token=creds["SessionToken"],
-    )
+    # Use the selected profile's credential chain for IAM lookups — boto3
+    # resolves SSO/source_profile/role_arn from ~/.aws/config.
+    iam = get_session(profile).client("iam")
 
     for finding in findings:
         lookup = _lookup_key(iam, finding.key_id)
