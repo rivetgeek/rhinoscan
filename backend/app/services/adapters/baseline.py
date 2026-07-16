@@ -22,9 +22,18 @@ class BaselineAdapter:
     def scan(self, target: str, run_id: str, db: Session, ctx: AdapterContext) -> int:
         session = get_session(target, ctx.region)
         account_id = get_account_id(session)
+        if not account_id:
+            # Credentials didn't resolve (e.g. expired `aws login` session).
+            # Fail the engine instead of running checks that will all error —
+            # otherwise the prune below would replace the target's real
+            # findings with a page of error wrappers.
+            raise RuntimeError(
+                f"Could not authenticate profile '{target}' — "
+                "credential chain did not resolve (try `aws login`)."
+            )
         check_ctx = CheckContext(
             session=session, profile=target,
-            account_id=account_id or "unknown", region=ctx.region,
+            account_id=account_id, region=ctx.region,
         )
 
         findings: list[Finding] = []
