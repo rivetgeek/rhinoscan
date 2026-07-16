@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   backend:
     build: ./backend
@@ -8,19 +6,46 @@ services:
     volumes:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
+      # Mount the operator's AWS config so RhinoScan reads the profile chain
+      # (SSO sessions, source_profile, role_arn) exactly as the AWS CLI does.
+      # Read-only so the container can never alter profile definitions or drop
+      # long-term keys into ~/.aws/credentials.
+      - ${AWS_CONFIG_DIR:-${HOME}/.aws}:/root/.aws:ro
+      # ...but the AWS CLI must WRITE two temp-credential caches to mirror the
+      # operator's `aws login` flow: assumed-role creds (cli/cache) and the
+      # refreshed login session (login/cache). These child mounts override the
+      # read-only parent at just those paths. Both hold only short-lived creds,
+      # exactly as the host CLI writes them. Without these, resolving any
+      # not-yet-cached profile fails with a read-only-filesystem error and the
+      # scan falls back to boto3, which can't resolve the `login` chain.
+      - ${AWS_CONFIG_DIR:-${HOME}/.aws}/cli/cache:/root/.aws/cli/cache:rw
+      - ${AWS_CONFIG_DIR:-${HOME}/.aws}/login/cache:/root/.aws/login/cache:rw
+      # GitHub CLI login, read-only. github_auth.py reads the host-level
+      # oauth_token from hosts.yml so GitHub-side scans reuse the operator's
+      # `gh auth login` — no token pasted in the UI. Overridden by GH_TOKEN /
+      # GITHUB_TOKEN env if set.
+      - ${HOME}/.config/gh:/root/.config/gh:ro
     environment:
       - DATABASE_URL=sqlite:////data/db/rhino.db
       - DATA_DIR=/data
       - HOST_DATA_DIR=${HOST_DATA_DIR}
+      # RhinoScan native checks read profiles from ~/.aws/config inside the container.
+      - AWS_CONFIG_FILE=/root/.aws/config
+      - AWS_EXCLUDED_PROFILES=${AWS_EXCLUDED_PROFILES:-default,grsconsultant}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}
+      # Optional static creds — only used by the legacy Prowler/TruffleHog path.
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
       - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
-      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
       - GITHUB_APP_ID=${GITHUB_APP_ID:-}
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:-}
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
+      # GitHub PAT override — falls back to ~/.config/gh/hosts.yml when unset.
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - PROWLER_IMAGE=${PROWLER_IMAGE:-toniblyx/prowler:latest}
       - TRUFFLE_IMAGE=${TRUFFLE_IMAGE:-trufflesecurity/trufflehog:latest}
+      - SCORECARD_IMAGE=${SCORECARD_IMAGE:-gcr.io/openssf/scorecard:stable}
     env_file:
       - .env
     restart: unless-stopped
