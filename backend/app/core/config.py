@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     # Host path to DATA_DIR — required for Prowler/TruffleHog sibling containers
     HOST_DATA_DIR: str = ""
 
+    # Static bearer token required on /api/v1 when set. Empty disables auth —
+    # acceptable only with ports bound to localhost (the compose default).
+    RHINOSCAN_API_TOKEN: str = ""
+
     # ── AWS (RhinoScan native checks) ─────────────────────────────────────────
     # Path to the AWS config file boto3 reads profiles from. Defaults to the
     # standard ~/.aws/config; override to mount a client's config elsewhere.

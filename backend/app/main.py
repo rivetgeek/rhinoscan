@@ -1,12 +1,9 @@
 import logging
-import threading
-import uuid
-from datetime import datetime
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
@@ -18,26 +15,23 @@ from app.models.db import (
     Finding,
     ProwlerFinding,
     Run,
-    ScanJob,
     ScorecardFinding,
     TruffleFinding,
 )
-from app.services import scanner
+from app.services import runner
+from app.services.adapters import ADAPTERS, engines_for
 from app.services.aws_profiles import list_profiles
 from app.services.checks.base import SEVERITY_ORDER
-from app.services.correlation import run_correlation
-from app.services.github_auth import resolve_gh_token
-from app.services.prowler import run_prowler, run_prowler_github
+from app.services.export import export_ndjson
 from app.services.report import generate_report
-from app.services.scorecard import run_scorecard
-from app.services.truffle import run_trufflehog
 
-app = FastAPI(title="Gray Rhino Security Scanner", version="1.0.0")
+app = FastAPI(title="RhinoScan — Gray Rhino Security", version="2.0.0")
 
+# The frontend is served same-origin through nginx; CORS only matters for
+# direct dev access to :8000.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -51,248 +45,134 @@ def on_startup():
             "HOST_DATA_DIR is not set — scan containers may fail to write output. "
             "Set it to the absolute host path of ./data in your .env file."
         )
+    if not settings.RHINOSCAN_API_TOKEN:
+        logging.warning(
+            "RHINOSCAN_API_TOKEN is not set — the API is unauthenticated. "
+            "Fine for localhost-only use; set a token before exposing it."
+        )
+
+
+def require_token(request: Request):
+    """Static bearer auth for /api/v1. Disabled when no token is configured
+    (localhost-only development)."""
+    token = settings.RHINOSCAN_API_TOKEN
+    if not token:
+        return
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {token}":
+        raise HTTPException(status_code=401, detail="Invalid or missing API token")
+
+
+v1 = APIRouter(prefix="/api/v1", dependencies=[Depends(require_token)])
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
 
 class ScanRequest(BaseModel):
-    profile: str  # ~/.aws/config profile the scan targets
-    aws_region: str = "us-east-1"
-    github_org: Optional[str] = None
-    github_token: Optional[str] = None  # installation token from OAuth flow
+    targets: List[str]                    # AWS profiles and/or "github:<org>"
+    engines: Optional[List[str]] = None   # default: all applicable per target
 
 
-class ScanResponse(BaseModel):
-    job_id: str
-    status: str
-    created_at: datetime
+# ── Targets + engines ─────────────────────────────────────────────────────────
 
 
-# ── Scan endpoints ────────────────────────────────────────────────────────────
-
-
-@app.post("/api/scans", response_model=ScanResponse)
-def create_scan(req: ScanRequest, db: Session = Depends(get_db)):
-    available = set(list_profiles())
-    if req.profile not in available:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown profile: {req.profile}",
-        )
-
-    job_id = str(uuid.uuid4())
-    gh_pending = "pending" if req.github_org else "skipped"
-    job = ScanJob(
-        id=job_id,
-        status="running",
-        profile=req.profile,
-        aws_region=req.aws_region,
-        github_org=req.github_org,
-        prowler_status="pending",
-        prowler_github_status=gh_pending,
-        truffle_status=gh_pending,
-        scorecard_status=gh_pending,
-    )
-    db.add(job)
-    db.commit()
-
-    # Run scans in background thread so we return immediately
-    thread = threading.Thread(
-        target=_run_scan_pipeline,
-        args=(job_id, req.profile, req.aws_region, req.github_org, req.github_token),
-        daemon=True,
-    )
-    thread.start()
-
-    return ScanResponse(job_id=job_id, status="running", created_at=job.created_at)
-
-
-def _run_scan_pipeline(
-    job_id: str,
-    profile: str,
-    region: str,
-    github_org: Optional[str],
-    github_token: Optional[str],
-):
-    """Runs the AWS + GitHub scanners, then correlation. Own DB session.
-
-    The GitHub-side scanners (Prowler GitHub provider, TruffleHog secrets,
-    OpenSSF Scorecard) authenticate with the operator's gh-login PAT, resolved
-    server-side via ``github_auth``. A per-request token still takes precedence
-    if one was supplied. With an org but no resolvable token, the GitHub
-    scanners are cleanly skipped.
-    """
-    from app.core.database import SessionLocal
-
-    db = SessionLocal()
-    any_ok = False
-    truffle_ok = False
-
+@v1.get("/profiles")
+def get_profiles():
+    """List scannable AWS profiles from ~/.aws/config (excludes operator profiles)."""
     try:
-        run_prowler(job_id, profile, region, db)
-        any_ok = True
-    except Exception:
-        pass
-
-    token = github_token or resolve_gh_token()
-
-    if github_org and token:
-        try:
-            run_prowler_github(job_id, github_org, token, db)
-            any_ok = True
-        except Exception:
-            pass
-
-        try:
-            run_trufflehog(job_id, github_org, token, db)
-            truffle_ok = True
-            any_ok = True
-        except Exception:
-            pass
-
-        try:
-            run_scorecard(job_id, github_org, token, db)
-            any_ok = True
-        except Exception:
-            pass
-    elif github_org and not token:
-        # No PAT available — mark the GitHub scanners skipped rather than failed.
-        job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
-        job.prowler_github_status = "skipped"
-        job.truffle_status = "skipped"
-        job.scorecard_status = "skipped"
-        db.commit()
-
-    if truffle_ok:
-        try:
-            run_correlation(job_id, profile, db)
-        except Exception:
-            pass
-
-    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
-    job.status = "complete" if any_ok else "failed"
-    job.updated_at = datetime.utcnow()
-    db.commit()
-    db.close()
+        return {"profiles": list_profiles()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not read AWS config: {e}")
 
 
-@app.get("/api/scans")
-def list_scans(db: Session = Depends(get_db)):
-    jobs = db.query(ScanJob).order_by(ScanJob.created_at.desc()).all()
-    return [
-        {
-            "job_id": j.id,
-            "status": j.status,
-            "profile": j.profile,
-            "role_arn": j.role_arn,
-            "github_org": j.github_org,
-            "aws_region": j.aws_region,
-            "prowler_status": j.prowler_status,
-            "prowler_github_status": j.prowler_github_status,
-            "truffle_status": j.truffle_status,
-            "scorecard_status": j.scorecard_status,
-            "created_at": j.created_at,
-            "updated_at": j.updated_at,
-        }
-        for j in jobs
-    ]
-
-
-@app.get("/api/scans/{job_id}")
-def get_scan(job_id: str, db: Session = Depends(get_db)):
-    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Scan not found")
-
-    # Severity cards count FAILs only — a passing critical-severity check is
-    # not a critical finding. Totals still report every check evaluated.
-    prowler_counts = (
-        db.query(ProwlerFinding.severity, func.count(ProwlerFinding.id))
-        .filter(
-            ProwlerFinding.job_id == job_id,
-            ProwlerFinding.provider == "aws",
-            ProwlerFinding.status == "FAIL",
-        )
-        .group_by(ProwlerFinding.severity)
-        .all()
-    )
-    prowler_total = (
-        db.query(func.count(ProwlerFinding.id))
-        .filter(ProwlerFinding.job_id == job_id, ProwlerFinding.provider == "aws")
-        .scalar()
-    )
-    prowler_github_counts = (
-        db.query(ProwlerFinding.severity, func.count(ProwlerFinding.id))
-        .filter(
-            ProwlerFinding.job_id == job_id,
-            ProwlerFinding.provider == "github",
-            ProwlerFinding.status == "FAIL",
-        )
-        .group_by(ProwlerFinding.severity)
-        .all()
-    )
-    prowler_github_total = (
-        db.query(func.count(ProwlerFinding.id))
-        .filter(ProwlerFinding.job_id == job_id, ProwlerFinding.provider == "github")
-        .scalar()
-    )
-    truffle_count = (
-        db.query(func.count(TruffleFinding.id))
-        .filter(TruffleFinding.job_id == job_id)
-        .scalar()
-    )
-    alert_count = (
-        db.query(func.count(CorrelatedAlert.id))
-        .filter(CorrelatedAlert.job_id == job_id)
-        .scalar()
-    )
-    # Scorecard: one repo score (repeated across that repo's check rows), so
-    # average distinct repo scores for the headline number.
-    repo_scores = (
-        db.query(ScorecardFinding.repo, func.max(ScorecardFinding.repo_score))
-        .filter(ScorecardFinding.job_id == job_id)
-        .group_by(ScorecardFinding.repo)
-        .all()
-    )
-    scored = [s for _, s in repo_scores if s is not None]
-    scorecard_summary = {
-        "repos_scored": len(repo_scores),
-        "avg_score": round(sum(scored) / len(scored), 1) if scored else None,
-    }
-
+@v1.get("/engines")
+def get_engines():
+    """List available scanner adapters."""
     return {
-        "job_id": job.id,
-        "status": job.status,
-        "profile": job.profile,
-        "role_arn": job.role_arn,
-        "github_org": job.github_org,
-        "aws_region": job.aws_region,
-        "prowler_status": job.prowler_status,
-        "prowler_github_status": job.prowler_github_status,
-        "truffle_status": job.truffle_status,
-        "scorecard_status": job.scorecard_status,
-        "error_message": job.error_message,
-        "created_at": job.created_at,
-        "updated_at": job.updated_at,
-        "summary": {
-            "prowler_by_severity": dict(prowler_counts),
-            "prowler_total_checks": prowler_total,
-            "prowler_github_by_severity": dict(prowler_github_counts),
-            "prowler_github_total_checks": prowler_github_total,
-            "truffle_findings": truffle_count,
-            "correlated_alerts": alert_count,
-            "scorecard": scorecard_summary,
-        },
+        "engines": [
+            {
+                "name": a.engine,
+                "label": a.label,
+                "origin": a.origin,
+                "target_type": a.target_type,
+            }
+            for a in ADAPTERS.values()
+        ]
     }
 
 
-# ── Findings endpoints ────────────────────────────────────────────────────────
+# ── Scans ─────────────────────────────────────────────────────────────────────
 
 
-@app.get("/api/scans/{job_id}/prowler")
+@v1.post("/scans")
+def create_scans(req: ScanRequest):
+    """Trigger scans: one run per target, engines filtered to what applies."""
+    if not req.targets:
+        raise HTTPException(status_code=400, detail="At least one target is required.")
+
+    available = set(list_profiles())
+    for t in req.targets:
+        if t.startswith("github:"):
+            if not t.removeprefix("github:").strip():
+                raise HTTPException(status_code=400, detail=f"Invalid GitHub target: {t}")
+        elif t not in available:
+            raise HTTPException(status_code=400, detail=f"Unknown profile: {t}")
+
+    if req.engines:
+        unknown = [e for e in req.engines if e not in ADAPTERS]
+        if unknown:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown engine(s): {', '.join(unknown)}"
+            )
+        for t in req.targets:
+            if not set(req.engines) & set(engines_for(t)):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"None of the requested engines apply to target: {t}",
+                )
+
+    run_ids = runner.start_scans(req.targets, req.engines)
+    return {"run_ids": run_ids, "status": "running"}
+
+
+def _run_dict(r: Run) -> dict:
+    return {
+        "run_id": r.id,
+        "target": r.target,
+        "engines": r.engines or [],
+        "engine_status": r.engine_status or {},
+        "errors": r.errors,
+        "status": r.status,
+        "started_at": r.started_at,
+        "completed_at": r.completed_at,
+        "finding_count": r.finding_count,
+    }
+
+
+@v1.get("/scans")
+def list_runs(
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    runs = db.query(Run).order_by(Run.started_at.desc()).limit(limit).all()
+    return {"runs": [_run_dict(r) for r in runs]}
+
+
+@v1.get("/scans/{run_id}")
+def get_run(run_id: str, db: Session = Depends(get_db)):
+    run = db.query(Run).filter(Run.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return _run_dict(run)
+
+
+# ── Engine raw-detail views ───────────────────────────────────────────────────
+
+
+@v1.get("/scans/{run_id}/prowler")
 def get_prowler_findings(
-    job_id: str,
+    run_id: str,
     provider: str = Query("aws"),
     severity: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
@@ -305,7 +185,7 @@ def get_prowler_findings(
     db: Session = Depends(get_db),
 ):
     q = db.query(ProwlerFinding).filter(
-        ProwlerFinding.job_id == job_id,
+        ProwlerFinding.run_id == run_id,
         ProwlerFinding.provider == provider,
     )
 
@@ -374,12 +254,12 @@ def get_prowler_findings(
     }
 
 
-@app.get("/api/scans/{job_id}/prowler/{finding_id}")
-def get_prowler_finding(job_id: str, finding_id: int, db: Session = Depends(get_db)):
+@v1.get("/scans/{run_id}/prowler/{finding_id}")
+def get_prowler_finding(run_id: str, finding_id: int, db: Session = Depends(get_db)):
     """Return a single Prowler finding including the full raw Prowler/OCSF result."""
     f = (
         db.query(ProwlerFinding)
-        .filter(ProwlerFinding.job_id == job_id, ProwlerFinding.id == finding_id)
+        .filter(ProwlerFinding.run_id == run_id, ProwlerFinding.id == finding_id)
         .first()
     )
     if not f:
@@ -400,9 +280,9 @@ def get_prowler_finding(job_id: str, finding_id: int, db: Session = Depends(get_
     }
 
 
-@app.get("/api/scans/{job_id}/truffle")
+@v1.get("/scans/{run_id}/secrets")
 def get_truffle_findings(
-    job_id: str,
+    run_id: str,
     search: Optional[str] = Query(None),
     repo: Optional[str] = Query(None),
     verified: Optional[bool] = Query(None),
@@ -412,7 +292,7 @@ def get_truffle_findings(
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    q = db.query(TruffleFinding).filter(TruffleFinding.job_id == job_id)
+    q = db.query(TruffleFinding).filter(TruffleFinding.run_id == run_id)
 
     if repo:
         q = q.filter(TruffleFinding.repo == repo)
@@ -462,12 +342,12 @@ def get_truffle_findings(
     }
 
 
-@app.get("/api/scans/{job_id}/scorecard")
-def get_scorecard_findings(job_id: str, db: Session = Depends(get_db)):
+@v1.get("/scans/{run_id}/scorecard")
+def get_scorecard_findings(run_id: str, db: Session = Depends(get_db)):
     """Return OpenSSF Scorecard results grouped by repo, weakest scores first."""
     rows = (
         db.query(ScorecardFinding)
-        .filter(ScorecardFinding.job_id == job_id)
+        .filter(ScorecardFinding.run_id == run_id)
         .all()
     )
     repos: dict[str, dict] = {}
@@ -488,14 +368,11 @@ def get_scorecard_findings(job_id: str, db: Session = Depends(get_db)):
     return {"total": len(result), "repos": result}
 
 
-@app.get("/api/scans/{job_id}/alerts")
-def get_correlated_alerts(
-    job_id: str,
-    db: Session = Depends(get_db),
-):
+@v1.get("/scans/{run_id}/alerts")
+def get_correlated_alerts(run_id: str, db: Session = Depends(get_db)):
     alerts = (
         db.query(CorrelatedAlert)
-        .filter(CorrelatedAlert.job_id == job_id)
+        .filter(CorrelatedAlert.run_id == run_id)
         .order_by(CorrelatedAlert.created_at.desc())
         .all()
     )
@@ -521,90 +398,7 @@ def get_correlated_alerts(
     ]
 
 
-@app.get("/api/scans/{job_id}/findings/raw")
-def get_raw_findings(job_id: str, db: Session = Depends(get_db)):
-    """Return all raw JSON for export."""
-    prowler = db.query(ProwlerFinding).filter(
-        ProwlerFinding.job_id == job_id, ProwlerFinding.provider == "aws"
-    ).all()
-    prowler_github = db.query(ProwlerFinding).filter(
-        ProwlerFinding.job_id == job_id, ProwlerFinding.provider == "github"
-    ).all()
-    truffle = db.query(TruffleFinding).filter(TruffleFinding.job_id == job_id).all()
-    scorecard = db.query(ScorecardFinding).filter(ScorecardFinding.job_id == job_id).all()
-    alerts = db.query(CorrelatedAlert).filter(CorrelatedAlert.job_id == job_id).all()
-
-    return {
-        "job_id": job_id,
-        "prowler": [f.raw for f in prowler],
-        "prowler_github": [f.raw for f in prowler_github],
-        "truffle": [f.raw for f in truffle],
-        "scorecard": [f.raw for f in scorecard],
-        "correlated_alerts": [
-            {
-                "id": a.id,
-                "severity": a.severity,
-                "title": a.title,
-                "narrative": a.narrative,
-                "key_id": a.key_id,
-                "key_active": a.key_active,
-                "iam_entity_name": a.iam_entity_name,
-                "attached_policies": a.attached_policies,
-                "repo": a.repo,
-                "file_path": a.file_path,
-            }
-            for a in alerts
-        ],
-    }
-
-
-# ── RhinoScan baseline assessment (profile-driven, native boto3) ──────────────
-
-
-class BaselineScanRequest(BaseModel):
-    profiles: List[str]
-
-
-@app.get("/profiles")
-def get_profiles():
-    """List scannable AWS profiles from ~/.aws/config (excludes operator profiles)."""
-    try:
-        return {"profiles": list_profiles()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not read AWS config: {e}")
-
-
-@app.post("/scan")
-def trigger_scan(req: BaselineScanRequest):
-    """Trigger a baseline scan against one or more profiles. Returns run ids."""
-    if not req.profiles:
-        raise HTTPException(status_code=400, detail="At least one profile is required.")
-
-    available = set(list_profiles())
-    unknown = [p for p in req.profiles if p not in available]
-    if unknown:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown profile(s): {', '.join(unknown)}",
-        )
-
-    run_ids = scanner.start_scan(req.profiles)
-    return {"run_ids": run_ids, "status": "running"}
-
-
-@app.get("/scan/{run_id}")
-def scan_status(run_id: str, db: Session = Depends(get_db)):
-    run = db.query(Run).filter(Run.id == run_id).first()
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return {
-        "run_id": run.id,
-        "profile": run.profile,
-        "status": run.status,
-        "started_at": run.started_at,
-        "completed_at": run.completed_at,
-        "finding_count": run.finding_count,
-    }
+# ── Unified findings ──────────────────────────────────────────────────────────
 
 
 def _finding_dict(f: Finding) -> dict:
@@ -626,37 +420,58 @@ def _finding_dict(f: Finding) -> dict:
     }
 
 
-@app.get("/findings")
+@v1.get("/findings")
 def query_findings(
-    profile: Optional[str] = Query(None),
+    target: Optional[str] = Query(None),
     severity: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
+    origin: Optional[str] = Query(None),
     run_id: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
     q = db.query(Finding)
-    if profile:
-        q = q.filter(Finding.profile == profile)
+    if target:
+        q = q.filter(Finding.profile == target)
     if severity:
         q = q.filter(Finding.severity == severity)
     if category:
         q = q.filter(Finding.category == category)
+    if origin:
+        q = q.filter(Finding.origin == origin)
     if run_id:
         q = q.filter(Finding.run_id == run_id)
 
-    findings = q.all()
-    findings.sort(key=lambda f: SEVERITY_ORDER.get(f.severity, 99))
-    return {"total": len(findings), "findings": [_finding_dict(f) for f in findings]}
+    total = q.count()
+
+    # Severity is ranked, not alphabetical — CASE order, most severe first.
+    sev_rank = case(
+        *[(Finding.severity == sev, rank) for sev, rank in SEVERITY_ORDER.items()],
+        else_=99,
+    )
+    findings = (
+        q.order_by(sev_rank.asc(), Finding.category, Finding.title)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "findings": [_finding_dict(f) for f in findings],
+    }
 
 
-@app.get("/findings/summary")
+@v1.get("/findings/summary")
 def findings_summary(
-    profile: Optional[str] = Query(None),
+    target: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     q = db.query(Finding)
-    if profile:
-        q = q.filter(Finding.profile == profile)
+    if target:
+        q = q.filter(Finding.profile == target)
 
     by_severity = dict(
         q.with_entities(Finding.severity, func.count(Finding.id))
@@ -668,24 +483,43 @@ def findings_summary(
         .group_by(Finding.category)
         .all()
     )
+    by_origin = dict(
+        q.with_entities(Finding.origin, func.count(Finding.id))
+        .group_by(Finding.origin)
+        .all()
+    )
 
     runs_q = db.query(Run)
-    if profile:
-        runs_q = runs_q.filter(Run.profile == profile)
+    if target:
+        runs_q = runs_q.filter(Run.target == target)
     runs = runs_q.all()
-    accounts_scanned = len({r.profile for r in runs if r.status == "complete"})
+    targets_scanned = len({
+        r.target for r in runs if r.status in ("complete", "partial")
+    })
     last_scan = max((r.completed_at or r.started_at for r in runs), default=None)
 
     return {
         "by_severity": by_severity,
         "by_category": by_category,
-        "accounts_scanned": accounts_scanned,
+        "by_origin": by_origin,
+        "accounts_scanned": targets_scanned,
         "last_scan": last_scan,
         "total": sum(by_severity.values()),
     }
 
 
-@app.get("/report/{run_id}", response_class=PlainTextResponse)
+@v1.get("/findings/{finding_id}")
+def get_finding(finding_id: str, db: Session = Depends(get_db)):
+    f = db.query(Finding).filter(Finding.id == finding_id).first()
+    if not f:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    return _finding_dict(f)
+
+
+# ── Report + export ───────────────────────────────────────────────────────────
+
+
+@v1.get("/report/{run_id}", response_class=PlainTextResponse)
 def report(run_id: str, db: Session = Depends(get_db)):
     md = generate_report(db, run_id)
     if md is None:
@@ -695,6 +529,35 @@ def report(run_id: str, db: Session = Depends(get_db)):
         media_type="text/markdown",
         headers={"Content-Disposition": f'attachment; filename="rhinoscan-{run_id}.md"'},
     )
+
+
+@v1.get("/export")
+def export(
+    since: Optional[str] = Query(None, description="iso8601 lower bound"),
+    target: Optional[str] = Query(None),
+    include_raw: bool = Query(False),
+):
+    """Hephaestus export: rhinoscan.export.v1 NDJSON (envelope, then findings)."""
+
+    # Own session, not Depends(get_db): FastAPI tears yield-dependencies down
+    # before a StreamingResponse finishes streaming.
+    def stream():
+        from app.core.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            yield from export_ndjson(db, since=since, target=target, include_raw=include_raw)
+        finally:
+            db.close()
+
+    return StreamingResponse(
+        stream(),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="rhinoscan-export.ndjson"'},
+    )
+
+
+app.include_router(v1)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

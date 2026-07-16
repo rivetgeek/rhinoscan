@@ -40,11 +40,13 @@ def generate_report(db: Session, run_id: str) -> str | None:
 
     account_id = findings[0].account_id if findings else "unknown"
     date = datetime.utcnow().strftime("%Y-%m-%d")
+    engines = ", ".join(run.engines or []) or "unknown"
 
     lines: list[str] = []
-    lines.append("# RhinoScan Baseline Security Assessment")
-    lines.append(f"**Client:** {run.profile}")
-    lines.append(f"**Account:** {run.profile} ({account_id})")
+    lines.append("# RhinoScan Security Assessment")
+    lines.append(f"**Client:** {run.target}")
+    lines.append(f"**Target:** {run.target} ({account_id})")
+    lines.append(f"**Engines:** {engines}")
     lines.append(f"**Date:** {date}")
     lines.append(f"**Run ID:** {run_id}")
     lines.append("")
@@ -62,6 +64,7 @@ def generate_report(db: Session, run_id: str) -> str | None:
             lines.append("_None._")
         for f in group:
             lines.append(f"### {f.title}")
+            lines.append(f"- **Source:** {f.origin}")
             lines.append(f"- **Category:** {f.category}")
             lines.append(f"- **Resource:** `{f.resource}`")
             lines.append(f"- **Check:** `{f.source}`")

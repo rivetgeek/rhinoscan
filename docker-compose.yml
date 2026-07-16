@@ -2,7 +2,10 @@ services:
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      # Localhost only — the API can trigger scans with the operator's
+      # credentials and serves client findings. Set RHINOSCAN_API_TOKEN
+      # before exposing it beyond this machine.
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -29,6 +32,9 @@ services:
       - DATABASE_URL=sqlite:////data/db/rhino.db
       - DATA_DIR=/data
       - HOST_DATA_DIR=${HOST_DATA_DIR}
+      # Bearer token required on /api/v1 when set (empty = auth disabled,
+      # localhost-only). nginx injects it for the frontend.
+      - RHINOSCAN_API_TOKEN=${RHINOSCAN_API_TOKEN:-}
       # RhinoScan native checks read profiles from ~/.aws/config inside the container.
       - AWS_CONFIG_FILE=/root/.aws/config
       - AWS_EXCLUDED_PROFILES=${AWS_EXCLUDED_PROFILES:-default,grsconsultant}
@@ -53,7 +59,11 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Substituted into the nginx template so the proxy injects the
+      # Authorization header server-side — the browser never sees the token.
+      - RHINOSCAN_API_TOKEN=${RHINOSCAN_API_TOKEN:-}
     depends_on:
       - backend
     restart: unless-stopped
