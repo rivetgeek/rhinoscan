@@ -1,12 +1,37 @@
-# Gray Rhino Security Scanner
+# RhinoScan — Gray Rhino Security
 
-Prowler + TruffleHog with AWS credential correlation. Clone and run locally with Docker.
+AWS baseline security assessment platform. Runs a battery of nondestructive,
+read-only AWS checks against configured client profiles, surfaces findings in a
+dashboard, persists them in SQLite for delta tracking, and generates markdown
+reports.
+
+Profiles come straight from your `~/.aws/config` — there are no role ARNs to
+paste in. RhinoScan creates a `boto3.Session(profile_name=...)` per profile and
+lets boto3 resolve credentials (SSO, `source_profile`, `role_arn`, MFA) exactly
+as the AWS CLI does. The legacy Prowler + TruffleHog credential-correlation
+tooling still ships under **Prowler / Secrets** in the sidebar.
 
 ## Prerequisites
 
 - Docker + Docker Compose
-- AWS credentials with permission to `sts:AssumeRole` into the target client role
-- (Optional) GitHub token with org repo read access for TruffleHog
+- A working `~/.aws/config` with profiles for the client accounts you assess.
+  Each profile needs read-only access (e.g. the AWS-managed `SecurityAudit` +
+  `ViewOnlyAccess` policies).
+- (Optional) GitHub token with org repo read access for the legacy TruffleHog path
+
+## RhinoScan baseline assessment
+
+1. Start the stack (see Setup below). RhinoScan mounts `~/.aws` read-only.
+2. Open http://localhost:3000 — the **Dashboard** loads.
+3. Pick a profile (or **All profiles**) in the header source selector and click
+   **Scan**. Profiles are read live from `GET /profiles` (excluding `default`
+   and `grsconsultant`).
+4. Findings stream into the table once the run completes; filter by category via
+   the breakdown chart and expand a row for description + remediation.
+5. Download a markdown report at `GET /report/{run_id}`.
+
+Regional checks (GuardDuty, Security Hub, EC2, Lambda) default to `us-west-2`;
+set `AWS_DEFAULT_REGION` to change it. Multi-region is a follow-on.
 
 ## Setup
 
@@ -34,34 +59,29 @@ curl http://localhost:8000/health
 curl http://localhost:3000
 ```
 
-## IAM Role Requirements
+## IAM permission requirements
 
-The role you pass into the scanner needs:
+Both the native check battery and the legacy Prowler path run against the
+identity each `~/.aws/config` profile resolves to. That identity needs read-only
+coverage — the AWS-managed `SecurityAudit` and `IAMReadOnlyAccess` (or
+`ViewOnlyAccess`) policies are sufficient. Credential resolution (SSO,
+`source_profile`, `role_arn`, MFA) is handled by boto3 from the profile chain;
+there is no role ARN to paste in and no `sts:AssumeRole` policy to maintain on
+the scanner side.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    { "Effect": "Allow", "Action": "sts:AssumeRole", "Resource": "*" }
-  ]
-}
-```
-
-And the client's role needs these managed policies attached:
-- `arn:aws:iam::aws:policy/SecurityAudit`
-- `arn:aws:iam::aws:policy/IAMReadOnlyAccess`
-
-The trust policy on the client role should trust your scanner's AWS identity (instance role or IAM user).
-
-## V1 Local Test (AWS only)
+## Prowler / Secrets scan (legacy path)
 
 1. Start the stack (above)
-2. Open http://localhost:3000 → **New Scan**
-3. Enter a client IAM role ARN and region
+2. Open http://localhost:3000 → **Prowler / Secrets** → **New Scan**
+3. Pick an **AWS profile** from the dropdown (sourced live from `~/.aws/config`)
+   and a region
 4. Leave GitHub fields blank to run Prowler only
 5. Watch the job on the Scans page; open it when status is `complete`
 
-For GitHub secret scanning, also provide org name and a token with repo read access.
+RhinoScan resolves the selected profile's credential chain and passes the
+resulting temporary credentials into the Prowler container — the container never
+sees your `~/.aws` config. For GitHub secret scanning, also provide an org name
+and a token with repo read access.
 
 ## Data
 
@@ -74,13 +94,32 @@ Everything lives in `./data/` (gitignored except directory scaffolding):
 ## Architecture
 
 ```
-React (port 3000) → nginx → FastAPI (port 8000) → SQLite
+React (port 3000) → nginx → FastAPI (port 8000) → SQLite (findings, runs)
+                                                 → boto3 native check battery
+                                                   (per ~/.aws profile, read-only)
+
+Legacy path (Prowler / Secrets tab):
                                                  → Docker: Prowler container
                                                  → Docker: TruffleHog container
                                                  → boto3: IAM correlation
 ```
 
-The backend mounts the host Docker socket to launch Prowler and TruffleHog as sibling containers. `HOST_DATA_DIR` must point to the same `./data` directory on your host so scan output is written correctly.
+RhinoScan's native checks run in-process via boto3 against each selected profile
+— no containers, no static credentials. The backend mounts `~/.aws` read-only at
+`/root/.aws`. The legacy Prowler/TruffleHog path still mounts the host Docker
+socket to launch sibling containers; `HOST_DATA_DIR` must point at the same
+`./data` directory on your host for that path.
+
+### RhinoScan API
+
+```
+GET  /profiles              # scannable AWS profiles from ~/.aws/config
+POST /scan                  # body: { "profiles": [...] } → { run_ids }
+GET  /scan/{run_id}         # poll run status
+GET  /findings              # ?profile= &severity= &category= &run_id=
+GET  /findings/summary      # counts by severity + category, accounts scanned
+GET  /report/{run_id}       # markdown baseline report
+```
 
 ## V2 Roadmap
 
