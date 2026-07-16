@@ -1,33 +1,39 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, Crosshair, ChevronRight, ChevronDown } from "lucide-react";
+import { RefreshCw, Crosshair, ChevronRight, ChevronDown, Download } from "lucide-react";
 import {
   getProfiles,
   getFindings,
   getFindingsSummary,
+  exportUrl,
 } from "../api";
-
-const SEVS = ["Critical", "High", "Medium", "Low", "Informational"];
-const SEV_ORDER = Object.fromEntries(SEVS.map((s, i) => [s, i]));
 
 export default function Dashboard() {
   const navigate = useNavigate();
   const [profiles, setProfiles] = useState([]);
-  const [source, setSource] = useState("All"); // "All" | profile
+  const [source, setSource] = useState("All"); // "All" | target
   const [summary, setSummary] = useState(null);
-  const [findings, setFindings] = useState([]);
+  const [data, setData] = useState(null);
   const [categoryFilter, setCategoryFilter] = useState(null);
+  const [originFilter, setOriginFilter] = useState(null);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
 
-  const profileParam = source === "All" ? undefined : source;
+  const target = source === "All" ? undefined : source;
 
   const load = async () => {
     const [sum, f] = await Promise.all([
-      getFindingsSummary({ profile: profileParam }),
-      getFindings({ profile: profileParam }),
+      getFindingsSummary({ target }),
+      getFindings({
+        target,
+        category: categoryFilter || undefined,
+        origin: originFilter || undefined,
+        page,
+        page_size: 100,
+      }),
     ]);
     setSummary(sum);
-    setFindings(f.findings);
+    setData(f);
     setLoading(false);
   };
 
@@ -38,41 +44,46 @@ export default function Dashboard() {
   useEffect(() => {
     setLoading(true);
     load();
-  }, [source]);
+  }, [source, categoryFilter, originFilter, page]);
 
-  const visibleFindings = useMemo(() => {
-    let list = findings;
-    if (categoryFilter) list = list.filter((f) => f.category === categoryFilter);
-    return [...list].sort(
-      (a, b) => (SEV_ORDER[a.severity] ?? 9) - (SEV_ORDER[b.severity] ?? 9)
-    );
-  }, [findings, categoryFilter]);
+  const pickCategory = (c) => {
+    setPage(1);
+    setCategoryFilter(c === categoryFilter ? null : c);
+  };
+  const pickOrigin = (o) => {
+    setPage(1);
+    setOriginFilter(o === originFilter ? null : o);
+  };
 
   return (
     <div>
       <Header
         source={source}
-        setSource={setSource}
+        setSource={(s) => { setPage(1); setSource(s); }}
         profiles={profiles}
         onRefresh={load}
         onAssess={() => navigate("/assess")}
+        target={target}
       />
 
-      {loading ? (
+      {loading && !data ? (
         <div style={{ color: "var(--text-dim)", padding: 40, textAlign: "center" }}>Loading…</div>
       ) : (
         <>
           <SummaryCards summary={summary} />
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 16, marginTop: 16 }}>
+          <OriginFilter summary={summary} active={originFilter} onPick={pickOrigin} />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 16, marginTop: 12 }}>
             <FindingsTable
-              findings={visibleFindings}
+              data={data}
+              page={page}
+              setPage={setPage}
               categoryFilter={categoryFilter}
-              clearCategory={() => setCategoryFilter(null)}
+              clearCategory={() => pickCategory(categoryFilter)}
             />
             <CategoryBreakdown
               summary={summary}
               active={categoryFilter}
-              onPick={(c) => setCategoryFilter(c === categoryFilter ? null : c)}
+              onPick={pickCategory}
             />
           </div>
         </>
@@ -81,22 +92,25 @@ export default function Dashboard() {
   );
 }
 
-function Header({ source, setSource, profiles, onRefresh, onAssess }) {
+function Header({ source, setSource, profiles, onRefresh, onAssess, target }) {
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
       <div>
         <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--text-hi)" }}>Dashboard</h1>
         <p style={{ fontSize: 13, color: "var(--text-dim)", marginTop: 4 }}>
-          Aggregated security findings — view by account or across all profiles.
+          Aggregated security findings — view by target or across all.
         </p>
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <select className="select" value={source} onChange={(e) => setSource(e.target.value)}>
-          <option value="All">All accounts</option>
+          <option value="All">All targets</option>
           {profiles.map((p) => (
             <option key={p} value={p}>{p}</option>
           ))}
         </select>
+        <a className="btn btn-ghost" href={exportUrl({ target })} download title="Hephaestus export (NDJSON)">
+          <Download size={14} /> Export
+        </a>
         <button className="btn btn-ghost" onClick={onRefresh}>
           <RefreshCw size={14} /> Refresh
         </button>
@@ -114,7 +128,7 @@ function SummaryCards({ summary }) {
     { label: "Critical", value: sev.Critical || 0, color: "var(--red)" },
     { label: "High", value: sev.High || 0, color: "var(--accent)" },
     { label: "Medium", value: sev.Medium || 0, color: "var(--yellow)" },
-    { label: "Accounts scanned", value: summary?.accounts_scanned || 0, color: "var(--text-hi)" },
+    { label: "Targets scanned", value: summary?.accounts_scanned || 0, color: "var(--text-hi)" },
     { label: "Last scan", value: fmtDate(summary?.last_scan), color: "var(--text-hi)", small: true },
   ];
   return (
@@ -133,37 +147,31 @@ function SummaryCards({ summary }) {
   );
 }
 
-function CategoryBreakdown({ summary, active, onPick }) {
-  const byCat = summary?.by_category || {};
-  const entries = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
-  const max = Math.max(1, ...entries.map(([, v]) => v));
+function OriginFilter({ summary, active, onPick }) {
+  const byOrigin = summary?.by_origin || {};
+  const entries = Object.entries(byOrigin).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return null;
   return (
-    <div className="card" style={{ padding: 18, height: "fit-content" }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-hi)", marginBottom: 14 }}>
-        By Category
-      </div>
-      {entries.length === 0 && <div style={{ fontSize: 12, color: "var(--text-dim)" }}>No findings.</div>}
-      {entries.map(([cat, count]) => (
-        <div
-          key={cat}
-          onClick={() => onPick(cat)}
-          style={{ cursor: "pointer", marginBottom: 10, opacity: active && active !== cat ? 0.4 : 1 }}
+    <div style={{ display: "flex", gap: 6, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <span style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--text-dim)", marginRight: 4 }}>
+        Source
+      </span>
+      {entries.map(([origin, count]) => (
+        <span
+          key={origin}
+          onClick={() => onPick(origin)}
+          style={{ cursor: "pointer", opacity: active && active !== origin ? 0.4 : 1 }}
         >
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-            <span style={{ color: active === cat ? "var(--accent)" : "var(--text)" }}>{cat}</span>
-            <span className="mono" style={{ color: "var(--text-dim)" }}>{count}</span>
-          </div>
-          <div style={{ height: 6, background: "var(--bg)", borderRadius: 3, overflow: "hidden" }}>
-            <div style={{ width: `${(count / max) * 100}%`, height: "100%", background: active === cat ? "var(--accent)" : "var(--border-hi)" }} />
-          </div>
-        </div>
+          <OriginBadge origin={origin} suffix={` ${count}`} active={active === origin} />
+        </span>
       ))}
     </div>
   );
 }
 
-function FindingsTable({ findings, categoryFilter, clearCategory }) {
+function FindingsTable({ data, page, setPage, categoryFilter, clearCategory }) {
   const [expanded, setExpanded] = useState(null);
+  const findings = data?.findings || [];
   return (
     <div className="card" style={{ overflow: "hidden" }}>
       {categoryFilter && (
@@ -184,7 +192,7 @@ function FindingsTable({ findings, categoryFilter, clearCategory }) {
             <th>Category</th>
             <th>Title</th>
             <th>Resource</th>
-            <th>Profile</th>
+            <th>Target</th>
             <th>Timestamp</th>
           </tr>
         </thead>
@@ -230,6 +238,22 @@ function FindingsTable({ findings, categoryFilter, clearCategory }) {
         </tbody>
       </table>
       </div>
+      {data && data.total > data.page_size && (
+        <div className="pager" style={{ padding: "10px 14px" }}>
+          <button className="btn btn-ghost" disabled={page === 1} onClick={() => setPage(page - 1)} style={{ padding: "5px 10px" }}>
+            ‹
+          </button>
+          <span>Page {page} of {Math.ceil(data.total / data.page_size)} ({data.total} total)</span>
+          <button
+            className="btn btn-ghost"
+            disabled={page >= Math.ceil(data.total / data.page_size)}
+            onClick={() => setPage(page + 1)}
+            style={{ padding: "5px 10px" }}
+          >
+            ›
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -238,9 +262,11 @@ const ORIGIN_COLORS = {
   Baseline: "var(--accent)",
   Prowler: "var(--yellow)",
   GitHub: "var(--text-hi)",
+  Secrets: "var(--red)",
+  Scorecard: "var(--green, #2ecc71)",
 };
 
-function OriginBadge({ origin }) {
+function OriginBadge({ origin, suffix = "", active }) {
   const o = origin || "Baseline";
   const color = ORIGIN_COLORS[o] || "var(--text-dim)";
   return (
@@ -253,9 +279,10 @@ function OriginBadge({ origin }) {
         border: `1px solid ${color}`,
         color,
         whiteSpace: "nowrap",
+        background: active ? `color-mix(in srgb, ${color} 15%, transparent)` : "transparent",
       }}
     >
-      {o}
+      {o}{suffix}
     </span>
   );
 }
@@ -288,6 +315,35 @@ function RawResults({ raw }) {
       >
         {text}
       </pre>
+    </div>
+  );
+}
+
+function CategoryBreakdown({ summary, active, onPick }) {
+  const byCat = summary?.by_category || {};
+  const entries = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const max = Math.max(1, ...entries.map(([, v]) => v));
+  return (
+    <div className="card" style={{ padding: 18, height: "fit-content" }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-hi)", marginBottom: 14 }}>
+        By Category
+      </div>
+      {entries.length === 0 && <div style={{ fontSize: 12, color: "var(--text-dim)" }}>No findings.</div>}
+      {entries.map(([cat, count]) => (
+        <div
+          key={cat}
+          onClick={() => onPick(cat)}
+          style={{ cursor: "pointer", marginBottom: 10, opacity: active && active !== cat ? 0.4 : 1 }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+            <span style={{ color: active === cat ? "var(--accent)" : "var(--text)" }}>{cat}</span>
+            <span className="mono" style={{ color: "var(--text-dim)" }}>{count}</span>
+          </div>
+          <div style={{ height: 6, background: "var(--bg)", borderRadius: 3, overflow: "hidden" }}>
+            <div style={{ width: `${(count / max) * 100}%`, height: "100%", background: active === cat ? "var(--accent)" : "var(--border-hi)" }} />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

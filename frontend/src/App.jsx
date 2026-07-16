@@ -4,7 +4,6 @@ import { Shield, LayoutDashboard, Crosshair } from "lucide-react";
 import Dashboard from "./pages/Dashboard";
 import Assess from "./pages/Assess";
 import ScanDetail from "./pages/ScanDetail";
-import NewScan from "./pages/NewScan";
 
 export default function App() {
   return (
@@ -14,9 +13,8 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/assess" element={<Assess />} />
-          <Route path="/assess/new" element={<NewScan />} />
-          <Route path="/assess/:jobId" element={<ScanDetail />} />
-          <Route path="/assess/:jobId/:tab" element={<ScanDetail />} />
+          <Route path="/assess/:runId" element={<ScanDetail />} />
+          <Route path="/assess/:runId/:tab" element={<ScanDetail />} />
         </Routes>
       </main>
     </div>

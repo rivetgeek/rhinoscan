@@ -1,101 +1,99 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, RefreshCw, Download, AlertTriangle, ChevronUp, ChevronDown } from "lucide-react";
-import { getScan, getProwlerFindings, getProwlerFinding, getTruffleFindings, getAlerts, getRawFindings, getScorecard } from "../api";
-
-const TABS = ["alerts", "prowler", "github", "scorecard", "secrets"];
+import {
+  getRun, getFindings, getProwlerFindings, getProwlerFinding,
+  getSecretFindings, getAlerts, getScorecard, reportUrl,
+} from "../api";
 
 const TAB_LABELS = {
-  prowler: "Cloud Findings",
-  github: "GitHub Findings",
-  scorecard: "Scorecard",
+  findings: "Findings",
+  prowler: "Cloud Checks",
+  github: "GitHub Checks",
   secrets: "Secrets",
+  alerts: "Alerts",
+  scorecard: "Scorecard",
+};
+
+// Which tabs an engine contributes beyond the always-on unified Findings tab.
+const ENGINE_TABS = {
+  "prowler-aws": ["prowler"],
+  "prowler-github": ["github"],
+  "trufflehog": ["secrets", "alerts"],
+  "scorecard": ["scorecard"],
 };
 
 export default function ScanDetail() {
-  const { jobId, tab = "alerts" } = useParams();
+  const { runId, tab = "findings" } = useParams();
   const navigate = useNavigate();
-  const [job, setJob] = useState(null);
+  const [run, setRun] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const loadJob = useCallback(async () => {
-    const data = await getScan(jobId);
-    setJob(data);
+  const loadRun = useCallback(async () => {
+    const data = await getRun(runId);
+    setRun(data);
     setLoading(false);
-  }, [jobId]);
+  }, [runId]);
 
   useEffect(() => {
-    loadJob();
+    loadRun();
     const t = setInterval(() => {
-      if (job?.status === "running") loadJob();
+      if (run?.status === "running") loadRun();
     }, 4000);
     return () => clearInterval(t);
-  }, [loadJob, job?.status]);
-
-  const downloadRaw = async () => {
-    const data = await getRawFindings(jobId);
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `rhino-${jobId}.json`; a.click();
-  };
+  }, [loadRun, run?.status]);
 
   if (loading) return <div style={{ color: "var(--text-dim)", padding: 40 }}>Loading…</div>;
 
-  const summary = job?.summary || {};
+  const tabs = ["findings"];
+  for (const engine of run?.engines || []) {
+    tabs.push(...(ENGINE_TABS[engine] || []));
+  }
 
   return (
     <div>
       {/* Header */}
       <div style={{ marginBottom: 24 }}>
         <button className="btn btn-ghost" style={{ marginBottom: 16, paddingLeft: 8 }} onClick={() => navigate("/assess")}>
-          <ArrowLeft size={14} /> All Scans
+          <ArrowLeft size={14} /> All Runs
         </button>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
           <div>
-            <h1 style={{ fontSize: 18, fontWeight: 600, color: "var(--text-hi)" }}>
-              {job.profile || truncateArn(job.role_arn)}
+            <h1 style={{ fontSize: 18, fontWeight: 600, color: "var(--text-hi)", fontFamily: "var(--mono)" }}>
+              {run.target}
             </h1>
-            <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 12, color: "var(--text-dim)", fontFamily: "var(--mono)" }}>
-              <span>{job.aws_region}</span>
-              {job.github_org && <span>{job.github_org}</span>}
-              <span>{formatDate(job.created_at)}</span>
+            <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
+              {(run.engines || []).map((e) => (
+                <span key={e} className={`stat stat-${run.engine_status?.[e] || "pending"}`}>
+                  {e}: {run.engine_status?.[e] || "pending"}
+                </span>
+              ))}
+              <span className="mono" style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                {formatDate(run.started_at)}
+              </span>
             </div>
+            {run.errors && (
+              <div style={{ marginTop: 8, fontSize: 12, color: "var(--red)", fontFamily: "var(--mono)" }}>
+                {Object.entries(run.errors).map(([e, msg]) => `${e}: ${msg}`).join(" | ")}
+              </div>
+            )}
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span className={`stat stat-${job.status}`}>{job.status}</span>
-            <button className="btn btn-ghost" onClick={loadJob}><RefreshCw size={13} /></button>
-            <button className="btn btn-ghost" onClick={downloadRaw}><Download size={13} /> JSON</button>
+            <span className={`stat stat-${run.status}`}>{run.status}</span>
+            <button className="btn btn-ghost" onClick={loadRun}><RefreshCw size={13} /></button>
+            <a className="btn btn-ghost" href={reportUrl(runId)} download>
+              <Download size={13} /> Report
+            </a>
           </div>
         </div>
       </div>
 
-      {/* Summary cards — severity counts are FAILED checks only; Checks Run
-          is every check Prowler evaluated (pass + fail + manual). */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10, marginBottom: 28 }}>
-        {[
-          { label: "Critical", value: summary.prowler_by_severity?.critical || 0, cls: "sev-critical" },
-          { label: "High", value: summary.prowler_by_severity?.high || 0, cls: "sev-high" },
-          { label: "Medium", value: summary.prowler_by_severity?.medium || 0, cls: "sev-medium" },
-          { label: "Low", value: summary.prowler_by_severity?.low || 0, cls: "sev-low" },
-          { label: "Checks Run", value: summary.prowler_total_checks || 0, cls: "sev-low" },
-          { label: "Secrets Found", value: summary.truffle_findings || 0, cls: "sev-critical" },
-          { label: "Correlated Alerts", value: summary.correlated_alerts || 0, cls: "sev-critical" },
-          { label: "Repos Scored", value: summary.scorecard?.repos_scored || 0, cls: "sev-low" },
-          { label: "Avg Scorecard", value: summary.scorecard?.avg_score ?? "—", cls: "sev-low" },
-        ].map(({ label, value, cls }) => (
-          <div key={label} className="card" style={{ padding: "14px 16px" }}>
-            <div style={{ fontSize: 24, fontWeight: 600, color: "var(--text-hi)", fontFamily: "var(--mono)" }}>{value}</div>
-            <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4, textTransform: "uppercase", letterSpacing: ".06em" }}>{label}</div>
-          </div>
-        ))}
-      </div>
-
       {/* Tabs */}
       <div style={{ display: "flex", gap: 0, borderBottom: "1px solid var(--border)", marginBottom: 20 }}>
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <button
             key={t}
-            onClick={() => navigate(`/assess/${jobId}/${t}`)}
+            onClick={() => navigate(`/assess/${runId}/${t}`)}
             style={{
               padding: "10px 18px",
               fontSize: 13,
@@ -105,39 +103,127 @@ export default function ScanDetail() {
               border: "none",
               borderBottom: tab === t ? "2px solid var(--accent)" : "2px solid transparent",
               cursor: "pointer",
-              textTransform: "capitalize",
               marginBottom: -1,
             }}
           >
-            {t === "alerts" ? `⚠ Alerts (${summary.correlated_alerts || 0})` : TAB_LABELS[t]}
+            {TAB_LABELS[t]}
           </button>
         ))}
       </div>
 
-      {tab === "alerts" && <AlertsTab jobId={jobId} />}
-      {tab === "prowler" && <ProwlerTab jobId={jobId} provider="aws" />}
-      {tab === "github" && <ProwlerTab jobId={jobId} provider="github" />}
-      {tab === "scorecard" && <ScorecardTab jobId={jobId} />}
-      {tab === "secrets" && <SecretsTab jobId={jobId} />}
+      {tab === "findings" && <FindingsTab runId={runId} />}
+      {tab === "prowler" && <ProwlerTab runId={runId} provider="aws" />}
+      {tab === "github" && <ProwlerTab runId={runId} provider="github" />}
+      {tab === "secrets" && <SecretsTab runId={runId} />}
+      {tab === "alerts" && <AlertsTab runId={runId} />}
+      {tab === "scorecard" && <ScorecardTab runId={runId} />}
+    </div>
+  );
+}
+
+// ── Unified Findings Tab ──────────────────────────────────────────────────────
+
+function FindingsTab({ runId }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [expanded, setExpanded] = useState(null);
+
+  useEffect(() => {
+    setLoading(true);
+    getFindings({ run_id: runId, page, page_size: 100 })
+      .then(setData)
+      .finally(() => setLoading(false));
+  }, [runId, page]);
+
+  if (loading) return <Spinner />;
+  if (!data?.findings?.length) return (
+    <div className="card" style={{ padding: 48, textAlign: "center", color: "var(--text-dim)" }}>
+      No unified findings for this run.
+    </div>
+  );
+
+  return (
+    <>
+      <div className="card" style={{ overflow: "hidden", marginBottom: 12 }}>
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th style={{ width: 28 }}></th>
+              <th>Severity</th>
+              <th>Source</th>
+              <th>Category</th>
+              <th>Title</th>
+              <th>Resource</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.findings.map((f) => (
+              <React.Fragment key={f.id}>
+                <tr style={{ cursor: "pointer" }} onClick={() => setExpanded(expanded === f.id ? null : f.id)}>
+                  <td>{expanded === f.id ? <ChevronUp size={14} /> : <ChevronDown size={14} style={{ opacity: 0.35 }} />}</td>
+                  <td><span className={`sev sev-${f.severity.toLowerCase()}`}>{f.severity}</span></td>
+                  <td className="mono" style={{ fontSize: 12 }}>{f.origin}</td>
+                  <td>{f.category}</td>
+                  <td>{f.title}</td>
+                  <td className="mono">
+                    <div style={{ maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.resource}>
+                      {f.resource}
+                    </div>
+                  </td>
+                </tr>
+                {expanded === f.id && (
+                  <tr>
+                    <td colSpan={6} style={{ background: "var(--bg)" }}>
+                      <div style={{ padding: "8px 4px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
+                        <Detail label="Description" value={f.description} />
+                        <Detail label="Remediation" value={f.remediation} />
+                        <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+                          <Detail label="Check" value={f.source} mono />
+                          {f.api && <Detail label="AWS API" value={f.api} mono />}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pager total={data.total} page={page} pageSize={100} onChange={setPage} />
+    </>
+  );
+}
+
+function Detail({ label, value, mono }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--text-dim)", marginBottom: 3 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 13, color: "var(--text)", fontFamily: mono ? "var(--mono)" : "inherit", lineHeight: 1.5 }}>
+        {value}
+      </div>
     </div>
   );
 }
 
 // ── Alerts Tab ────────────────────────────────────────────────────────────────
 
-function AlertsTab({ jobId }) {
+function AlertsTab({ runId }) {
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    getAlerts(jobId).then(setAlerts).finally(() => setLoading(false));
-  }, [jobId]);
+    getAlerts(runId).then(setAlerts).finally(() => setLoading(false));
+  }, [runId]);
 
   if (loading) return <Spinner />;
 
   if (!alerts.length) return (
     <div className="card" style={{ padding: 48, textAlign: "center", color: "var(--text-dim)" }}>
-      No correlated alerts found. Either no AWS keys were exposed, or the GitHub scan was skipped.
+      No correlated alerts found. Either no AWS keys were exposed, or no AWS profiles were in the scan request to correlate against.
     </div>
   );
 
@@ -209,7 +295,7 @@ function MetaItem({ label, value }) {
 
 // ── Prowler Tab ───────────────────────────────────────────────────────────────
 
-function ProwlerTab({ jobId, provider = "aws" }) {
+function ProwlerTab({ runId, provider = "aws" }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [params, setParams] = useState({
@@ -220,12 +306,12 @@ function ProwlerTab({ jobId, provider = "aws" }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await getProwlerFindings(jobId, { ...params, provider });
+      const res = await getProwlerFindings(runId, { ...params, provider });
       setData(res);
     } finally {
       setLoading(false);
     }
-  }, [jobId, provider, params]);
+  }, [runId, provider, params]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -272,7 +358,7 @@ function ProwlerTab({ jobId, provider = "aws" }) {
               </thead>
               <tbody>
                 {data?.findings?.map((f) => (
-                  <ProwlerRow key={f.id} jobId={jobId} f={f} />
+                  <ProwlerRow key={f.id} runId={runId} f={f} />
                 ))}
               </tbody>
             </table>
@@ -286,7 +372,7 @@ function ProwlerTab({ jobId, provider = "aws" }) {
 }
 
 // Expandable Prowler row — click to load and show the full Prowler/OCSF result.
-function ProwlerRow({ jobId, f }) {
+function ProwlerRow({ runId, f }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -296,7 +382,7 @@ function ProwlerRow({ jobId, f }) {
     setOpen(next);
     if (next && !detail) {
       setLoading(true);
-      try { setDetail(await getProwlerFinding(jobId, f.id)); }
+      try { setDetail(await getProwlerFinding(runId, f.id)); }
       finally { setLoading(false); }
     }
   };
@@ -364,16 +450,16 @@ function ProwlerDetail({ d }) {
 
 // ── Secrets Tab ───────────────────────────────────────────────────────────────
 
-function SecretsTab({ jobId }) {
+function SecretsTab({ runId }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [params, setParams] = useState({ search: "", sort_by: "date", sort_dir: "desc", page: 1, page_size: 50 });
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { setData(await getTruffleFindings(jobId, params)); }
+    try { setData(await getSecretFindings(runId, params)); }
     finally { setLoading(false); }
-  }, [jobId, params]);
+  }, [runId, params]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -446,16 +532,16 @@ function scoreColor(score) {
   return "var(--red)";
 }
 
-function ScorecardTab({ jobId }) {
+function ScorecardTab({ runId }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { setData(await getScorecard(jobId)); }
+    try { setData(await getScorecard(runId)); }
     finally { setLoading(false); }
-  }, [jobId]);
+  }, [runId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -463,7 +549,7 @@ function ScorecardTab({ jobId }) {
 
   if (!data?.repos?.length) return (
     <div className="card" style={{ padding: 48, textAlign: "center", color: "var(--text-dim)" }}>
-      No Scorecard results. Either the GitHub scan was skipped, or no repos were scored.
+      No Scorecard results. Either the engine failed, or no repos were scored.
     </div>
   );
 
@@ -548,12 +634,6 @@ function Pager({ total, page, pageSize, onChange }) {
 
 function Spinner() {
   return <div style={{ color: "var(--text-dim)", padding: 40, textAlign: "center" }}>Loading…</div>;
-}
-
-function truncateArn(arn) {
-  const parts = arn?.split(":") || [];
-  if (parts.length >= 6) return parts.slice(4).join(":").replace("role/", "");
-  return arn;
 }
 
 function formatDate(iso) {
