@@ -1,37 +1,39 @@
 from botocore.exceptions import ClientError
 from sqlalchemy.orm import Session
 
-from app.models.db import CorrelatedAlert, IAMLookup, ScanJob, TruffleFinding
+from app.models.db import CorrelatedAlert, IAMLookup, TruffleFinding
 from app.services.aws_profiles import get_session
 
 
-def run_correlation(job_id: str, profile: str, db: Session):
+def run_correlation(run_id: str, profiles: list[str], db: Session):
     """
     For every TruffleHog finding with an AWS key ID:
     1. Look up the key in IAM (active status, owner, policies)
     2. Store IAMLookup record
     3. Generate a CorrelatedAlert
-    """
-    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
 
+    ``profiles`` are the AWS profiles from the same scan request; each key is
+    looked up against them in order until one account claims it (a client may
+    span several accounts, and the exposed key could belong to any of them).
+    """
     findings = (
         db.query(TruffleFinding)
         .filter(
-            TruffleFinding.job_id == job_id,
+            TruffleFinding.run_id == run_id,
             TruffleFinding.key_id.isnot(None),
         )
         .all()
     )
 
-    if not findings:
+    if not findings or not profiles:
         return
 
-    # Use the selected profile's credential chain for IAM lookups — boto3
-    # resolves SSO/source_profile/role_arn from ~/.aws/config.
-    iam = get_session(profile).client("iam")
+    # Use each profile's credential chain for IAM lookups — boto3 resolves
+    # SSO/source_profile/role_arn from ~/.aws/config.
+    iam_clients = [get_session(p).client("iam") for p in profiles]
 
     for finding in findings:
-        lookup = _lookup_key(iam, finding.key_id)
+        lookup = _lookup_key_in_accounts(iam_clients, finding.key_id)
 
         iam_record = IAMLookup(
             truffle_finding_id=finding.id,
@@ -49,10 +51,21 @@ def run_correlation(job_id: str, profile: str, db: Session):
         db.add(iam_record)
         db.flush()
 
-        alert = _build_alert(job_id, finding, lookup)
+        alert = _build_alert(run_id, finding, lookup)
         db.add(alert)
 
     db.commit()
+
+
+def _lookup_key_in_accounts(iam_clients: list, key_id: str) -> dict:
+    """Try each account's IAM until one resolves the key; otherwise return the
+    last error result (NoSuchEntity from an account that doesn't own the key)."""
+    result: dict = {}
+    for iam in iam_clients:
+        result = _lookup_key(iam, key_id)
+        if not result.get("error"):
+            return result
+    return result
 
 
 def _lookup_key(iam, key_id: str) -> dict:
@@ -97,7 +110,7 @@ def _lookup_key(iam, key_id: str) -> dict:
     return result
 
 
-def _build_alert(job_id: str, finding: TruffleFinding, lookup: dict) -> CorrelatedAlert:
+def _build_alert(run_id: str, finding: TruffleFinding, lookup: dict) -> CorrelatedAlert:
     policies = lookup.get("attached_policies", [])
     inline = lookup.get("inline_policy_names", [])
     entity_name = lookup.get("entity_name", "unknown")
@@ -124,7 +137,7 @@ def _build_alert(job_id: str, finding: TruffleFinding, lookup: dict) -> Correlat
     )
 
     return CorrelatedAlert(
-        job_id=job_id,
+        run_id=run_id,
         truffle_finding_id=finding.id,
         severity="CRITICAL" if active else "HIGH",
         title=f"Exposed AWS credential in {finding.repo}",
