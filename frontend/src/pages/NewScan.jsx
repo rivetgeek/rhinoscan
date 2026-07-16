@@ -1,33 +1,39 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Shield, ArrowLeft } from "lucide-react";
-import { createScan } from "../api";
+import { createScan, getProfiles } from "../api";
 
 export default function NewScan() {
   const navigate = useNavigate();
   const [form, setForm] = useState({
-    role_arn: "",
-    aws_region: "us-east-1",
+    profile: "",
+    aws_region: "us-west-2",
     github_org: "",
-    github_token: "",
   });
+  const [profiles, setProfiles] = useState([]);
+  const [profilesError, setProfilesError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  useEffect(() => {
+    getProfiles()
+      .then((res) => setProfiles(res.profiles || []))
+      .catch((e) => setProfilesError(e.message));
+  }, []);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const submit = async () => {
-    if (!form.role_arn) return setError("Role ARN is required.");
+    if (!form.profile) return setError("Select an AWS profile.");
     setLoading(true);
     setError(null);
     try {
       const res = await createScan({
-        role_arn: form.role_arn,
+        profile: form.profile,
         aws_region: form.aws_region,
         github_org: form.github_org || undefined,
-        github_token: form.github_token || undefined,
       });
-      navigate(`/scans/${res.job_id}`);
+      navigate(`/assess/${res.job_id}`);
     } catch (e) {
       setError(e.message);
       setLoading(false);
@@ -39,7 +45,7 @@ export default function NewScan() {
       <button
         className="btn btn-ghost"
         style={{ marginBottom: 24, paddingLeft: 8 }}
-        onClick={() => navigate("/")}
+        onClick={() => navigate("/assess")}
       >
         <ArrowLeft size={14} /> Back
       </button>
@@ -53,16 +59,29 @@ export default function NewScan() {
 
       <div className="card" style={{ padding: 28 }}>
         <Section title="AWS Configuration">
-          <Field label="IAM Role ARN" required>
-            <input
-              className="input"
+          <Field label="AWS Profile" required>
+            <select
+              className="select"
               style={{ width: "100%" }}
-              placeholder="arn:aws:iam::123456789012:role/RhinoScanRole"
-              value={form.role_arn}
-              onChange={set("role_arn")}
-            />
+              value={form.profile}
+              onChange={set("profile")}
+              disabled={!profiles.length}
+            >
+              <option value="">
+                {profilesError
+                  ? "Could not load profiles"
+                  : profiles.length
+                  ? "Select a profile…"
+                  : "Loading profiles…"}
+              </option>
+              {profiles.map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
             <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>
-              The role must trust your scanner's AWS identity and have SecurityAudit + IAMReadOnlyAccess.
+              {profilesError
+                ? profilesError
+                : "Profiles are read from ~/.aws/config. Credentials (SSO, source_profile, role_arn) are resolved by boto3."}
             </div>
           </Field>
 
@@ -75,7 +94,7 @@ export default function NewScan() {
           </Field>
         </Section>
 
-        <Section title="GitHub Configuration" subtitle="Optional — enables TruffleHog secret scanning">
+        <Section title="GitHub Configuration" subtitle="Optional — enables Prowler GitHub, TruffleHog secrets, and OpenSSF Scorecard">
           <Field label="GitHub Organization">
             <input
               className="input"
@@ -84,17 +103,10 @@ export default function NewScan() {
               value={form.github_org}
               onChange={set("github_org")}
             />
-          </Field>
-
-          <Field label="GitHub Token">
-            <input
-              className="input"
-              style={{ width: "100%" }}
-              type="password"
-              placeholder="ghp_… or fine-grained token with repo read access"
-              value={form.github_token}
-              onChange={set("github_token")}
-            />
+            <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>
+              The GitHub token is read from your <span className="mono">gh</span> login
+              (<span className="mono">gh auth login</span> / <span className="mono">GH_TOKEN</span>) — no token needed here.
+            </div>
           </Field>
         </Section>
 

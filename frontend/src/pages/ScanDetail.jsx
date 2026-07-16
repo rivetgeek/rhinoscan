@@ -1,9 +1,16 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, RefreshCw, Download, AlertTriangle, ChevronUp, ChevronDown } from "lucide-react";
-import { getScan, getProwlerFindings, getTruffleFindings, getAlerts, getRawFindings } from "../api";
+import { getScan, getProwlerFindings, getProwlerFinding, getTruffleFindings, getAlerts, getRawFindings, getScorecard } from "../api";
 
-const TABS = ["alerts", "prowler", "secrets"];
+const TABS = ["alerts", "prowler", "github", "scorecard", "secrets"];
+
+const TAB_LABELS = {
+  prowler: "Cloud Findings",
+  github: "GitHub Findings",
+  scorecard: "Scorecard",
+  secrets: "Secrets",
+};
 
 export default function ScanDetail() {
   const { jobId, tab = "alerts" } = useParams();
@@ -40,13 +47,13 @@ export default function ScanDetail() {
     <div>
       {/* Header */}
       <div style={{ marginBottom: 24 }}>
-        <button className="btn btn-ghost" style={{ marginBottom: 16, paddingLeft: 8 }} onClick={() => navigate("/")}>
+        <button className="btn btn-ghost" style={{ marginBottom: 16, paddingLeft: 8 }} onClick={() => navigate("/assess")}>
           <ArrowLeft size={14} /> All Scans
         </button>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
           <div>
             <h1 style={{ fontSize: 18, fontWeight: 600, color: "var(--text-hi)" }}>
-              {truncateArn(job.role_arn)}
+              {job.profile || truncateArn(job.role_arn)}
             </h1>
             <div style={{ display: "flex", gap: 12, marginTop: 6, fontSize: 12, color: "var(--text-dim)", fontFamily: "var(--mono)" }}>
               <span>{job.aws_region}</span>
@@ -62,15 +69,19 @@ export default function ScanDetail() {
         </div>
       </div>
 
-      {/* Summary cards */}
+      {/* Summary cards — severity counts are FAILED checks only; Checks Run
+          is every check Prowler evaluated (pass + fail + manual). */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10, marginBottom: 28 }}>
         {[
           { label: "Critical", value: summary.prowler_by_severity?.critical || 0, cls: "sev-critical" },
           { label: "High", value: summary.prowler_by_severity?.high || 0, cls: "sev-high" },
           { label: "Medium", value: summary.prowler_by_severity?.medium || 0, cls: "sev-medium" },
           { label: "Low", value: summary.prowler_by_severity?.low || 0, cls: "sev-low" },
+          { label: "Checks Run", value: summary.prowler_total_checks || 0, cls: "sev-low" },
           { label: "Secrets Found", value: summary.truffle_findings || 0, cls: "sev-critical" },
           { label: "Correlated Alerts", value: summary.correlated_alerts || 0, cls: "sev-critical" },
+          { label: "Repos Scored", value: summary.scorecard?.repos_scored || 0, cls: "sev-low" },
+          { label: "Avg Scorecard", value: summary.scorecard?.avg_score ?? "—", cls: "sev-low" },
         ].map(({ label, value, cls }) => (
           <div key={label} className="card" style={{ padding: "14px 16px" }}>
             <div style={{ fontSize: 24, fontWeight: 600, color: "var(--text-hi)", fontFamily: "var(--mono)" }}>{value}</div>
@@ -84,7 +95,7 @@ export default function ScanDetail() {
         {TABS.map((t) => (
           <button
             key={t}
-            onClick={() => navigate(`/scans/${jobId}/${t}`)}
+            onClick={() => navigate(`/assess/${jobId}/${t}`)}
             style={{
               padding: "10px 18px",
               fontSize: 13,
@@ -98,13 +109,15 @@ export default function ScanDetail() {
               marginBottom: -1,
             }}
           >
-            {t === "alerts" ? `⚠ Alerts (${summary.correlated_alerts || 0})` : t === "prowler" ? `Cloud Findings` : `Secrets`}
+            {t === "alerts" ? `⚠ Alerts (${summary.correlated_alerts || 0})` : TAB_LABELS[t]}
           </button>
         ))}
       </div>
 
       {tab === "alerts" && <AlertsTab jobId={jobId} />}
-      {tab === "prowler" && <ProwlerTab jobId={jobId} />}
+      {tab === "prowler" && <ProwlerTab jobId={jobId} provider="aws" />}
+      {tab === "github" && <ProwlerTab jobId={jobId} provider="github" />}
+      {tab === "scorecard" && <ScorecardTab jobId={jobId} />}
       {tab === "secrets" && <SecretsTab jobId={jobId} />}
     </div>
   );
@@ -196,7 +209,7 @@ function MetaItem({ label, value }) {
 
 // ── Prowler Tab ───────────────────────────────────────────────────────────────
 
-function ProwlerTab({ jobId }) {
+function ProwlerTab({ jobId, provider = "aws" }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [params, setParams] = useState({
@@ -207,12 +220,12 @@ function ProwlerTab({ jobId }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await getProwlerFindings(jobId, params);
+      const res = await getProwlerFindings(jobId, { ...params, provider });
       setData(res);
     } finally {
       setLoading(false);
     }
-  }, [jobId, params]);
+  }, [jobId, provider, params]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -259,19 +272,7 @@ function ProwlerTab({ jobId }) {
               </thead>
               <tbody>
                 {data?.findings?.map((f) => (
-                  <tr key={f.id}>
-                    <td><span className={`sev sev-${f.severity}`}>{f.severity}</span></td>
-                    <td><span className={`stat stat-${f.status}`}>{f.status}</span></td>
-                    <td className="mono">{f.service}</td>
-                    <td>
-                      <div style={{ fontSize: 13 }}>{f.check_title}</div>
-                      {f.status_extended && <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 3 }}>{f.status_extended}</div>}
-                    </td>
-                    <td className="mono">{f.region}</td>
-                    <td className="mono" style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {f.resource_name || f.resource_arn?.split("/").pop() || "—"}
-                    </td>
-                  </tr>
+                  <ProwlerRow key={f.id} jobId={jobId} f={f} />
                 ))}
               </tbody>
             </table>
@@ -280,6 +281,83 @@ function ProwlerTab({ jobId }) {
             onChange={(p) => setParams((x) => ({ ...x, page: p }))} />
         </>
       )}
+    </div>
+  );
+}
+
+// Expandable Prowler row — click to load and show the full Prowler/OCSF result.
+function ProwlerRow({ jobId, f }) {
+  const [open, setOpen] = useState(false);
+  const [detail, setDetail] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (next && !detail) {
+      setLoading(true);
+      try { setDetail(await getProwlerFinding(jobId, f.id)); }
+      finally { setLoading(false); }
+    }
+  };
+
+  return (
+    <>
+      <tr onClick={toggle} style={{ cursor: "pointer" }}>
+        <td><span className={`sev sev-${f.severity}`}>{f.severity}</span></td>
+        <td><span className={`stat stat-${f.status}`}>{f.status}</span></td>
+        <td className="mono">{f.service}</td>
+        <td>
+          <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+            {open ? <ChevronUp size={12} /> : <ChevronDown size={12} style={{ opacity: 0.35 }} />}
+            {f.check_title}
+          </div>
+          {f.status_extended && <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 3 }}>{f.status_extended}</div>}
+        </td>
+        <td className="mono">{f.region}</td>
+        <td className="mono" style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {f.resource_name || f.resource_arn?.split("/").pop() || "—"}
+        </td>
+      </tr>
+      {open && (
+        <tr>
+          <td colSpan={6} style={{ background: "var(--bg)", padding: 0 }}>
+            {loading
+              ? <div style={{ padding: 16, color: "var(--text-dim)" }}>Loading…</div>
+              : detail && <ProwlerDetail d={detail} />}
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function ProwlerDetail({ d }) {
+  return (
+    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div className="alert-meta">
+        <MetaItem label="Check ID" value={d.check_id} />
+        <MetaItem label="Severity" value={d.severity} />
+        <MetaItem label="Status" value={d.status} />
+        <MetaItem label="Service" value={d.service} />
+        <MetaItem label="Region" value={d.region} />
+        <MetaItem label="Resource" value={d.resource_name} />
+        <MetaItem label="Resource ARN" value={d.resource_arn} />
+      </div>
+      {d.status_extended && <div style={{ fontSize: 13, color: "var(--text)" }}>{d.status_extended}</div>}
+      <div>
+        <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--text-dim)", marginBottom: 6 }}>
+          Full Prowler Result
+        </div>
+        <pre style={{
+          margin: 0, maxHeight: 440, overflow: "auto",
+          background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 4,
+          padding: 12, fontSize: 11.5, fontFamily: "var(--mono)", color: "var(--text)",
+          whiteSpace: "pre-wrap", wordBreak: "break-word",
+        }}>
+{JSON.stringify(d.raw, null, 2)}
+        </pre>
+      </div>
     </div>
   );
 }
@@ -355,6 +433,83 @@ function SecretsTab({ jobId }) {
             onChange={(p) => setParams((x) => ({ ...x, page: p }))} />
         </>
       )}
+    </div>
+  );
+}
+
+// ── Scorecard Tab ─────────────────────────────────────────────────────────────
+
+function scoreColor(score) {
+  if (score == null || score < 0) return "var(--text-dim)";
+  if (score >= 8) return "var(--green, #2ecc71)";
+  if (score >= 5) return "var(--yellow, #f1c40f)";
+  return "var(--red)";
+}
+
+function ScorecardTab({ jobId }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [open, setOpen] = useState(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setData(await getScorecard(jobId)); }
+    finally { setLoading(false); }
+  }, [jobId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (loading) return <Spinner />;
+
+  if (!data?.repos?.length) return (
+    <div className="card" style={{ padding: 48, textAlign: "center", color: "var(--text-dim)" }}>
+      No Scorecard results. Either the GitHub scan was skipped, or no repos were scored.
+    </div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {data.repos.map((r) => {
+        const isOpen = open === r.repo;
+        return (
+          <div key={r.repo} className="card" style={{ overflow: "hidden" }}>
+            <div
+              style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", cursor: "pointer" }}
+              onClick={() => setOpen(isOpen ? null : r.repo)}
+            >
+              {isOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              <span className="mono" style={{ flex: 1 }}>{r.repo}</span>
+              <span style={{ fontFamily: "var(--mono)", fontWeight: 600, color: scoreColor(r.repo_score) }}>
+                {r.repo_score != null ? `${r.repo_score} / 10` : "—"}
+              </span>
+            </div>
+            {isOpen && (
+              <table className="tbl">
+                <thead>
+                  <tr><th>Check</th><th>Score</th><th>Reason</th></tr>
+                </thead>
+                <tbody>
+                  {r.checks.map((c) => (
+                    <tr key={c.check_name}>
+                      <td>
+                        {c.documentation_url ? (
+                          <a href={c.documentation_url} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+                            {c.check_name}
+                          </a>
+                        ) : c.check_name}
+                      </td>
+                      <td style={{ fontFamily: "var(--mono)", color: scoreColor(c.check_score) }}>
+                        {c.check_score != null && c.check_score >= 0 ? c.check_score : "?"}
+                      </td>
+                      <td style={{ fontSize: 12, color: "var(--text-dim)" }}>{c.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

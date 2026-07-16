@@ -1,7 +1,8 @@
 import React from "react";
-import { Routes, Route, NavLink, useNavigate } from "react-router-dom";
-import { Shield, Scan, AlertTriangle } from "lucide-react";
-import Jobs from "./pages/Jobs";
+import { Routes, Route, NavLink } from "react-router-dom";
+import { Shield, LayoutDashboard, Crosshair } from "lucide-react";
+import Dashboard from "./pages/Dashboard";
+import Assess from "./pages/Assess";
 import ScanDetail from "./pages/ScanDetail";
 import NewScan from "./pages/NewScan";
 
@@ -11,10 +12,11 @@ export default function App() {
       <Sidebar />
       <main style={{ flex: 1, overflow: "auto", padding: "32px" }}>
         <Routes>
-          <Route path="/" element={<Jobs />} />
-          <Route path="/new" element={<NewScan />} />
-          <Route path="/scans/:jobId" element={<ScanDetail />} />
-          <Route path="/scans/:jobId/:tab" element={<ScanDetail />} />
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/assess" element={<Assess />} />
+          <Route path="/assess/new" element={<NewScan />} />
+          <Route path="/assess/:jobId" element={<ScanDetail />} />
+          <Route path="/assess/:jobId/:tab" element={<ScanDetail />} />
         </Routes>
       </main>
     </div>
@@ -55,17 +57,20 @@ function Sidebar() {
           <Shield size={20} color="var(--accent)" />
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-hi)", letterSpacing: ".02em" }}>
-              Gray Rhino
+              RhinoScan
             </div>
             <div style={{ fontSize: 10, color: "var(--text-dim)", letterSpacing: ".06em", textTransform: "uppercase" }}>
-              Security Scanner
+              Gray Rhino Security
             </div>
           </div>
         </div>
       </div>
 
-      <NavLink to="/" style={linkStyle}>
-        <Scan size={15} /> Scans
+      <NavLink to="/" end style={linkStyle}>
+        <LayoutDashboard size={15} /> Dashboard
+      </NavLink>
+      <NavLink to="/assess" style={linkStyle}>
+        <Crosshair size={15} /> Assess
       </NavLink>
 
       <div style={{ flex: 1 }} />
