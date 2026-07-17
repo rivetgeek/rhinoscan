@@ -83,7 +83,7 @@ export default function Dashboard() {
         <>
           <SummaryCards summary={summary} />
           <OriginFilter summary={summary} active={originFilter} onPick={pickOrigin} />
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 16, marginTop: 12 }}>
+          <div className="dash-grid">
             <FindingsTable
               data={data}
               page={page}
@@ -105,14 +105,14 @@ export default function Dashboard() {
 
 function Header({ source, setSource, profiles, onRefresh, onAssess, target }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, gap: 12, flexWrap: "wrap" }}>
       <div>
         <h1 style={{ fontSize: 20, fontWeight: 600, color: "var(--text-hi)" }}>Dashboard</h1>
         <p style={{ fontSize: 13, color: "var(--text-dim)", marginTop: 4 }}>
           Aggregated security findings — view by target or across all.
         </p>
       </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <select className="select" value={source} onChange={(e) => setSource(e.target.value)}>
           <option value="All">All targets</option>
           {profiles.map((p) => (
@@ -146,7 +146,7 @@ function SummaryCards({ summary }) {
     { label: "Last scan", value: fmtDate(summary?.last_scan), color: "var(--text-hi)", small: true },
   ];
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 12 }}>
+    <div className="summary-cards">
       {cards.map((c) => (
         <div key={c.label} className="card" style={{ padding: "16px 18px" }}>
           <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--text-dim)" }}>

@@ -9,7 +9,7 @@ export default function App() {
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden" }}>
       <Sidebar />
-      <main style={{ flex: 1, overflow: "auto", padding: "32px" }}>
+      <main className="main-content">
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/assess" element={<Assess />} />
