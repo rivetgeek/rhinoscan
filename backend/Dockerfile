@@ -25,4 +25,7 @@ COPY . .
 
 RUN mkdir -p /data/db /data/scans /data/reports
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# No --reload: source is baked into the image so there is nothing to watch,
+# and the reload supervisor keeps the socket open when the worker dies —
+# requests then hang instead of the container exiting for Docker to restart.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

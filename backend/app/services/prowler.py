@@ -2,6 +2,9 @@ import hashlib
 import json
 import os
 import subprocess
+from typing import Iterable
+
+import ijson
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -101,10 +104,10 @@ def run_prowler(run_id: str, profile: str, region: str, db: Session) -> int:
     if not findings_file.exists():
         raise RuntimeError(f"Prowler failed: {_err(result)}")
 
-    with open(findings_file) as f:
-        raw_findings = json.load(f)
-
-    _ingest_prowler_findings(run_id, raw_findings, db, provider="aws")
+    # Stream the OCSF array — large accounts produce files in the hundreds of
+    # MB, and json.load'ing those OOM-kills the worker.
+    with open(findings_file, "rb") as f:
+        _ingest_prowler_findings(run_id, ijson.items(f, "item"), db, provider="aws")
     return rollup_to_findings(run_id, db, provider="aws",
                               target=profile, origin="Prowler")
 
@@ -117,12 +120,18 @@ def run_prowler_github(run_id: str, github_org: str, token: str, db: Session) ->
 
     # Token passed by name only (value via env) so it can't leak through a
     # subprocess error string. See run_prowler.
+    #
+    # --organization scopes the scan to the client org. Without it Prowler's
+    # GitHub provider scans every repo the PAT can see (personal repos, other
+    # orgs) and we would mislabel it as this client's findings. github_org is
+    # guaranteed non-empty by the github_org() resolver. Never drop this flag.
     cmd = [
         "docker", "run", "--rm",
         "-v", f"{host_data_path(scan_dir)}:/output",
         "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
         settings.PROWLER_IMAGE,
         "github",
+        "--organization", github_org,
         "--output-formats", "json-ocsf",
         "--output-directory", "/output",
         "--output-filename", "prowler_github",
@@ -139,10 +148,9 @@ def run_prowler_github(run_id: str, github_org: str, token: str, db: Session) ->
     if not findings_file.exists():
         raise RuntimeError(f"Prowler GitHub failed: {_err(result)}")
 
-    with open(findings_file) as f:
-        raw_findings = json.load(f)
-
-    _ingest_prowler_findings(run_id, raw_findings, db, provider="github")
+    # Stream the OCSF array — see run_prowler.
+    with open(findings_file, "rb") as f:
+        _ingest_prowler_findings(run_id, ijson.items(f, "item"), db, provider="github")
     return rollup_to_findings(run_id, db, provider="github",
                               target=f"github:{github_org}", origin="GitHub")
 
@@ -187,9 +195,17 @@ def rollup_to_findings(run_id: str, db: Session, provider: str,
 
         service = (r.service or "").lower()
         remediation = ""
+        references: list = []
         rem = raw.get("remediation")
         if isinstance(rem, dict):
             remediation = str(rem.get("desc") or "")
+            references = [u for u in (rem.get("references") or []) if u]
+            # Append the fix references so the remediation is self-contained —
+            # these URLs would otherwise stay buried in prowler_findings.raw and
+            # never reach the Hephaestus export (which emits unified findings).
+            if references:
+                remediation = (remediation + "\nReferences: " +
+                               "; ".join(references)).strip()
         account_id = str(
             ((raw.get("cloud") or {}).get("account") or {}).get("uid")
             or (target.removeprefix("github:") if provider == "github" else "")
@@ -212,10 +228,26 @@ def rollup_to_findings(run_id: str, db: Session, provider: str,
         row.source = r.check_id
         row.origin = origin
         row.api = ""
-        # Slim reference only — the full OCSF result stays in prowler_findings.
-        row.raw = {"run_id": run_id, "prowler_finding_id": r.id, "region": r.region}
+        # Actionable subset — enough to triage without the full OCSF result
+        # (which stays in prowler_findings and reaches Hephaestus only via
+        # ?include_raw). risk_details explains why it matters; references link
+        # the fix; status_extended is the concrete failure text.
+        row.raw = {
+            "run_id": run_id,
+            "prowler_finding_id": r.id,
+            "check_id": r.check_id,
+            "region": r.region,
+            "resource": resource,
+            "status_extended": r.status_extended or "",
+            "risk_details": str(raw.get("risk_details") or ""),
+            "references": references,
+        }
         row.run_id = run_id
 
+    # Flush pending upserts first: with autoflush off, re-observed rows still
+    # carry their old run_id in the DB, so the delete below would remove them
+    # and the commit's UPDATEs would hit zero rows (StaleDataError).
+    db.flush()
     # Drop this origin's findings from previous scans of the same target.
     db.query(FindingRow).filter(
         FindingRow.profile == target,
@@ -227,7 +259,7 @@ def rollup_to_findings(run_id: str, db: Session, provider: str,
     return len(seen)
 
 
-def _ingest_prowler_findings(run_id: str, raw: list, db: Session, provider: str = "aws"):
+def _ingest_prowler_findings(run_id: str, raw: Iterable, db: Session, provider: str = "aws"):
     """Parse Prowler v5 OCSF Detection Findings into ProwlerFinding rows.
 
     OCSF shape (per finding):
@@ -237,7 +269,11 @@ def _ingest_prowler_findings(run_id: str, raw: list, db: Session, provider: str 
       status_code                   -> status (PASS/FAIL/MANUAL/MUTED)
       status_detail                 -> status_extended
       resources[0].{group.name, region, uid, name}  -> service/region/arn/name
+
+    ``raw`` may be a generator (streamed parse); rows are flushed in batches so
+    the session never holds a whole large scan's findings in memory.
     """
+    pending = 0
     for item in raw:
         meta = item.get("metadata") or {}
         finding_info = item.get("finding_info") or {}
@@ -262,5 +298,9 @@ def _ingest_prowler_findings(run_id: str, raw: list, db: Session, provider: str 
             raw=item,
         )
         db.add(finding)
+        pending += 1
+        if pending >= 1000:
+            db.flush()
+            pending = 0
 
     db.commit()

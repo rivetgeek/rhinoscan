@@ -21,6 +21,12 @@ export default function Dashboard() {
 
   const target = source === "All" ? undefined : source;
 
+  // AWS profiles from ~/.aws/config plus every target that has findings (so
+  // scanned github:<org> targets are selectable, not just AWS profiles).
+  const selectableTargets = Array.from(
+    new Set([...profiles, ...(summary?.targets || [])])
+  ).sort();
+
   const load = async () => {
     const [sum, f] = await Promise.all([
       getFindingsSummary({ target }),
@@ -46,6 +52,11 @@ export default function Dashboard() {
     load();
   }, [source, categoryFilter, originFilter, page]);
 
+  useEffect(() => {
+    const t = setInterval(load, 10000); // keep numbers live while scans run
+    return () => clearInterval(t);
+  }, [source, categoryFilter, originFilter, page]);
+
   const pickCategory = (c) => {
     setPage(1);
     setCategoryFilter(c === categoryFilter ? null : c);
@@ -60,7 +71,7 @@ export default function Dashboard() {
       <Header
         source={source}
         setSource={(s) => { setPage(1); setSource(s); }}
-        profiles={profiles}
+        profiles={selectableTargets}
         onRefresh={load}
         onAssess={() => navigate("/assess")}
         target={target}
@@ -128,11 +139,14 @@ function SummaryCards({ summary }) {
     { label: "Critical", value: sev.Critical || 0, color: "var(--red)" },
     { label: "High", value: sev.High || 0, color: "var(--accent)" },
     { label: "Medium", value: sev.Medium || 0, color: "var(--yellow)" },
+    // Combined so the four severity cards sum to the total finding count
+    // (matching the source badges); Low/Informational are otherwise omitted.
+    { label: "Low / Info", value: (sev.Low || 0) + (sev.Informational || 0), color: "var(--text-dim)" },
     { label: "Targets scanned", value: summary?.accounts_scanned || 0, color: "var(--text-hi)" },
     { label: "Last scan", value: fmtDate(summary?.last_scan), color: "var(--text-hi)", small: true },
   ];
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 12 }}>
       {cards.map((c) => (
         <div key={c.label} className="card" style={{ padding: "16px 18px" }}>
           <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--text-dim)" }}>

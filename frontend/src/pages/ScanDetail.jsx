@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, RefreshCw, Download, AlertTriangle, ChevronUp, ChevronDown } from "lucide-react";
 import {
@@ -28,11 +28,17 @@ export default function ScanDetail() {
   const navigate = useNavigate();
   const [run, setRun] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Bumped whenever engine statuses change, so open tabs re-fetch their data.
+  const [version, setVersion] = useState(0);
+  const statusSig = useRef("");
 
   const loadRun = useCallback(async () => {
     const data = await getRun(runId);
     setRun(data);
     setLoading(false);
+    const sig = JSON.stringify([data.status, data.engine_status]);
+    if (statusSig.current && statusSig.current !== sig) setVersion((v) => v + 1);
+    statusSig.current = sig;
   }, [runId]);
 
   useEffect(() => {
@@ -80,7 +86,7 @@ export default function ScanDetail() {
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <span className={`stat stat-${run.status}`}>{run.status}</span>
-            <button className="btn btn-ghost" onClick={loadRun}><RefreshCw size={13} /></button>
+            <button className="btn btn-ghost" onClick={() => { loadRun(); setVersion((v) => v + 1); }}><RefreshCw size={13} /></button>
             <a className="btn btn-ghost" href={reportUrl(runId)} download>
               <Download size={13} /> Report
             </a>
@@ -111,32 +117,31 @@ export default function ScanDetail() {
         ))}
       </div>
 
-      {tab === "findings" && <FindingsTab runId={runId} />}
-      {tab === "prowler" && <ProwlerTab runId={runId} provider="aws" />}
-      {tab === "github" && <ProwlerTab runId={runId} provider="github" />}
-      {tab === "secrets" && <SecretsTab runId={runId} />}
-      {tab === "alerts" && <AlertsTab runId={runId} />}
-      {tab === "scorecard" && <ScorecardTab runId={runId} />}
+      {tab === "findings" && <FindingsTab runId={runId} version={version} />}
+      {tab === "prowler" && <ProwlerTab runId={runId} provider="aws" version={version} />}
+      {tab === "github" && <ProwlerTab runId={runId} provider="github" version={version} />}
+      {tab === "secrets" && <SecretsTab runId={runId} version={version} />}
+      {tab === "alerts" && <AlertsTab runId={runId} version={version} />}
+      {tab === "scorecard" && <ScorecardTab runId={runId} version={version} />}
     </div>
   );
 }
 
 // ── Unified Findings Tab ──────────────────────────────────────────────────────
 
-function FindingsTab({ runId }) {
+function FindingsTab({ runId, version }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [expanded, setExpanded] = useState(null);
 
   useEffect(() => {
-    setLoading(true);
     getFindings({ run_id: runId, page, page_size: 100 })
       .then(setData)
       .finally(() => setLoading(false));
-  }, [runId, page]);
+  }, [runId, page, version]);
 
-  if (loading) return <Spinner />;
+  if (loading && !data) return <Spinner />;
   if (!data?.findings?.length) return (
     <div className="card" style={{ padding: 48, textAlign: "center", color: "var(--text-dim)" }}>
       No unified findings for this run.
@@ -202,7 +207,7 @@ function Detail({ label, value, mono }) {
       <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--text-dim)", marginBottom: 3 }}>
         {label}
       </div>
-      <div style={{ fontSize: 13, color: "var(--text)", fontFamily: mono ? "var(--mono)" : "inherit", lineHeight: 1.5 }}>
+      <div style={{ fontSize: 13, color: "var(--text)", fontFamily: mono ? "var(--mono)" : "inherit", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
         {value}
       </div>
     </div>
@@ -211,13 +216,13 @@ function Detail({ label, value, mono }) {
 
 // ── Alerts Tab ────────────────────────────────────────────────────────────────
 
-function AlertsTab({ runId }) {
+function AlertsTab({ runId, version }) {
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     getAlerts(runId).then(setAlerts).finally(() => setLoading(false));
-  }, [runId]);
+  }, [runId, version]);
 
   if (loading) return <Spinner />;
 
@@ -295,7 +300,7 @@ function MetaItem({ label, value }) {
 
 // ── Prowler Tab ───────────────────────────────────────────────────────────────
 
-function ProwlerTab({ runId, provider = "aws" }) {
+function ProwlerTab({ runId, provider = "aws", version }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [params, setParams] = useState({
@@ -304,14 +309,13 @@ function ProwlerTab({ runId, provider = "aws" }) {
   });
 
   const load = useCallback(async () => {
-    setLoading(true);
     try {
       const res = await getProwlerFindings(runId, { ...params, provider });
       setData(res);
     } finally {
       setLoading(false);
     }
-  }, [runId, provider, params]);
+  }, [runId, provider, params, version]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -450,16 +454,15 @@ function ProwlerDetail({ d }) {
 
 // ── Secrets Tab ───────────────────────────────────────────────────────────────
 
-function SecretsTab({ runId }) {
+function SecretsTab({ runId, version }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [params, setParams] = useState({ search: "", sort_by: "date", sort_dir: "desc", page: 1, page_size: 50 });
 
   const load = useCallback(async () => {
-    setLoading(true);
     try { setData(await getSecretFindings(runId, params)); }
     finally { setLoading(false); }
-  }, [runId, params]);
+  }, [runId, params, version]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -532,20 +535,19 @@ function scoreColor(score) {
   return "var(--red)";
 }
 
-function ScorecardTab({ runId }) {
+function ScorecardTab({ runId, version }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
     try { setData(await getScorecard(runId)); }
     finally { setLoading(false); }
-  }, [runId]);
+  }, [runId, version]);
 
   useEffect(() => { load(); }, [load]);
 
-  if (loading) return <Spinner />;
+  if (loading && !data) return <Spinner />;
 
   if (!data?.repos?.length) return (
     <div className="card" style={{ padding: 48, textAlign: "center", color: "var(--text-dim)" }}>

@@ -29,7 +29,21 @@ def target_type(target: str) -> str:
 
 
 def github_org(target: str) -> str:
-    return target.removeprefix(GITHUB_PREFIX)
+    """Resolve the org/user to scan from a ``github:<org>`` target.
+
+    Refuses an empty org. Every GitHub engine scopes its scan with this value
+    (prowler ``--organization``, trufflehog ``--org``, scorecard's repo
+    listing); passing an empty string makes prowler and trufflehog fall back
+    to scanning every repo the operator's PAT can see — personal repos and
+    unrelated orgs — and mislabel it all as this target. Fail loudly instead.
+    """
+    org = target.removeprefix(GITHUB_PREFIX).strip()
+    if not org:
+        raise ValueError(
+            f"GitHub target {target!r} has no org — refusing to scan. "
+            "A scan with no org would enumerate every repo the token can reach."
+        )
+    return org
 
 
 @dataclass
@@ -59,6 +73,10 @@ def prune_stale_findings(db: Session, target: str, origin: str, run_id: str) -> 
     the given run — resolved issues, or leftovers from prior failed runs — so
     the dashboard reflects current posture. Each adapter calls this after a
     successful scan; origins never touch each other's rows."""
+    # Flush pending upserts first: with autoflush off, re-observed rows still
+    # carry their old run_id in the DB, so this delete would remove them and
+    # the commit's UPDATEs would hit zero rows (StaleDataError).
+    db.flush()
     db.query(FindingRow).filter(
         FindingRow.profile == target,
         FindingRow.origin == origin,

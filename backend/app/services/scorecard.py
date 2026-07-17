@@ -118,15 +118,48 @@ def rollup_to_findings(run_id: str, target: str, db: Session) -> int:
         fid = hashlib.sha256(key.encode()).hexdigest()[:32]
         seen.add(fid)
 
-        # Weakest checks (score 0-10; -1 means inconclusive, skip those).
+        # Weakest failing checks (score 0-10; -1 means inconclusive, skip
+        # those). Sub-5/10 are what drag the repo down and where the fix
+        # effort belongs; cap at 5 so the finding stays readable.
         weakest = sorted(
-            (c for c in entry["checks"] if c.check_score is not None and c.check_score >= 0),
+            (c for c in entry["checks"]
+             if c.check_score is not None and 0 <= c.check_score < _MEDIUM_BELOW),
             key=lambda c: c.check_score,
-        )[:3]
+        )[:5]
+        # Fall back to the lowest scored checks if none are below the medium
+        # bar (repo scored low for another reason, e.g. many inconclusives).
+        if not weakest:
+            weakest = sorted(
+                (c for c in entry["checks"]
+                 if c.check_score is not None and c.check_score >= 0),
+                key=lambda c: c.check_score,
+            )[:3]
         weak_str = "; ".join(
             f"{c.check_name} ({c.check_score}/10): {c.reason or 'no detail'}"
             for c in weakest
         ) or "no per-check detail available"
+
+        # Per-check specifics Scorecard hands us but the summary drops: the
+        # documentation URL (exact fix guide) and the `details` lines (which
+        # name the concrete problem, e.g. the unprotected branch). These make
+        # the finding actionable on its own — and, since the unified findings
+        # table is what feeds the Hephaestus export, actionable downstream too.
+        weak_detail = [
+            {
+                "check": c.check_name,
+                "score": c.check_score,
+                "reason": c.reason or "",
+                "doc": c.documentation_url or "",
+                "details": (c.raw or {}).get("details") or [],
+            }
+            for c in weakest
+        ]
+        remediation = "Fix the weakest checks:\n" + "\n".join(
+            f"- {d['check']} ({d['score']}/10): {d['reason']}"
+            + (f" — see {d['doc']}" if d["doc"] else "")
+            + (f" [{'; '.join(d['details'])}]" if d["details"] else "")
+            for d in weak_detail
+        )
 
         row = db.query(FindingRow).filter(FindingRow.id == fid).first()
         if row is None:
@@ -143,14 +176,11 @@ def rollup_to_findings(run_id: str, target: str, db: Session) -> int:
             f"OpenSSF Scorecard rates '{repo}' {score}/10 overall. "
             f"Weakest checks — {weak_str}."
         )
-        row.remediation = (
-            "Address the lowest-scoring Scorecard checks first; each check's "
-            "documentation describes the exact fix (see the run's Scorecard tab)."
-        )
+        row.remediation = remediation
         row.source = "scorecard_repo_score"
         row.origin = "Scorecard"
         row.api = ""
-        row.raw = {"run_id": run_id, "repo_score": score}
+        row.raw = {"run_id": run_id, "repo_score": score, "weakest_checks": weak_detail}
         row.run_id = run_id
 
     # Drop this origin's findings from previous scans of the same target.

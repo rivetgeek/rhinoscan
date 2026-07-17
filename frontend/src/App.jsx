@@ -22,28 +22,20 @@ export default function App() {
 }
 
 function Sidebar() {
+  // Only the dynamic (active) bits are inline; layout/padding live in the
+  // .nav-link CSS class so the mobile media query can collapse them.
   const linkStyle = ({ isActive }) => ({
-    display: "flex",
-    alignItems: "center",
-    gap: "10px",
-    padding: "9px 14px",
-    borderRadius: "5px",
     color: isActive ? "var(--text-hi)" : "var(--text-dim)",
     background: isActive ? "var(--border)" : "transparent",
-    fontSize: "13px",
     fontWeight: isActive ? 500 : 400,
-    transition: "all .15s",
   });
 
   return (
-    <nav style={{
-      width: 220,
+    <nav className="sidebar" style={{
       background: "var(--surface)",
       borderRight: "1px solid var(--border)",
       display: "flex",
       flexDirection: "column",
-      padding: "0 12px",
-      flexShrink: 0,
     }}>
       {/* Logo */}
       <div style={{
@@ -52,8 +44,8 @@ function Sidebar() {
         marginBottom: "12px",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <Shield size={20} color="var(--accent)" />
-          <div>
+          <Shield size={20} color="var(--accent)" style={{ flexShrink: 0 }} />
+          <div className="sidebar-label">
             <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-hi)", letterSpacing: ".02em" }}>
               RhinoScan
             </div>
@@ -64,16 +56,16 @@ function Sidebar() {
         </div>
       </div>
 
-      <NavLink to="/" end style={linkStyle}>
-        <LayoutDashboard size={15} /> Dashboard
+      <NavLink to="/" end className="nav-link" style={linkStyle}>
+        <LayoutDashboard size={15} style={{ flexShrink: 0 }} /> <span className="sidebar-label">Dashboard</span>
       </NavLink>
-      <NavLink to="/assess" style={linkStyle}>
-        <Crosshair size={15} /> Assess
+      <NavLink to="/assess" className="nav-link" style={linkStyle}>
+        <Crosshair size={15} style={{ flexShrink: 0 }} /> <span className="sidebar-label">Assess</span>
       </NavLink>
 
       <div style={{ flex: 1 }} />
 
-      <div style={{ padding: "16px 4px", borderTop: "1px solid var(--border)" }}>
+      <div className="sidebar-label" style={{ padding: "16px 4px", borderTop: "1px solid var(--border)" }}>
         <div style={{ fontSize: 10, color: "var(--text-dim)", letterSpacing: ".06em" }}>
           grayrhinosecurity.com
         </div>

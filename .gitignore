@@ -6,10 +6,11 @@
 *.key
 secrets/
 
-# Runtime data (SQLite DB, scan artifacts, reports)
+# Runtime data (SQLite DB, scan artifacts, reports, DB backups)
 data/db/*
 data/scans/*
 data/reports/*
+data/backups/
 !data/db/.gitkeep
 !data/scans/.gitkeep
 !data/reports/.gitkeep

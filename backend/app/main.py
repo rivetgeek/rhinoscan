@@ -498,6 +498,13 @@ def findings_summary(
     })
     last_scan = max((r.completed_at or r.started_at for r in runs), default=None)
 
+    # Every target that has findings, regardless of the current filter, so the
+    # dashboard selector can list AWS profiles AND github:<org> targets. Sourced
+    # from findings (not ~/.aws/config) so scanned github orgs appear here.
+    all_targets = sorted(
+        t for (t,) in db.query(Finding.profile).distinct().all() if t
+    )
+
     return {
         "by_severity": by_severity,
         "by_category": by_category,
@@ -505,6 +512,7 @@ def findings_summary(
         "accounts_scanned": targets_scanned,
         "last_scan": last_scan,
         "total": sum(by_severity.values()),
+        "targets": all_targets,
     }
 
 

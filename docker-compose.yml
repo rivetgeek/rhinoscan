@@ -59,7 +59,10 @@ services:
   frontend:
     build: ./frontend
     ports:
+      # Localhost plus this machine's Tailscale IP — reachable from the
+      # tailnet but not the LAN. Keep RHINOSCAN_API_TOKEN set alongside this.
       - "127.0.0.1:3000:3000"
+      - "100.66.152.14:3000:3000"
     environment:
       # Substituted into the nginx template so the proxy injects the
       # Authorization header server-side — the browser never sees the token.

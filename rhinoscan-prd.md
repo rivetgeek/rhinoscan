@@ -437,6 +437,14 @@ Response: `application/x-ndjson`, one envelope line then one line per finding:
   responses can be large and Hephaestus rarely needs them
 - Open question (Hephaestus-side): pull on schedule vs. operator-triggered
   push. Export endpoint supports both; no webhook in this version.
+- Open question (export auth, noted 2026-07-16): nginx injects the operator's
+  bearer token for anything reaching the frontend port, so exposing the
+  frontend beyond localhost (e.g. the Tailscale binding) makes exports
+  pullable by the whole network without a credential — the token only gates
+  direct backend access. Before Hephaestus ingestion ships, decide how it
+  authenticates as itself: publish the backend port on the tailnet and issue
+  Hephaestus its own token (separate from the operator's, so either can be
+  rotated alone), or scope the nginx-injected token to UI routes only.
 
 ## Frontend
 
